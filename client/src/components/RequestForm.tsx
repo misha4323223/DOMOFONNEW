@@ -1,5 +1,13 @@
 export function RequestForm() {
-  // Google Form embedded URL - user will need to replace with their actual form
+  // ============================================================================
+  // КАК ВСТРОИТЬ СВОЮ GOOGLE FORM:
+  // 
+  // 1. Создайте форму на https://forms.google.com/
+  // 2. Нажмите "Отправить" → выберите вкладку "< > (Встроить HTML)"
+  // 3. Скопируйте ссылку из src="" (например: https://docs.google.com/.../viewform?embedded=true)
+  // 4. Замените строку ниже на вашу ссылку
+  // ============================================================================
+  
   const googleFormUrl = "https://docs.google.com/forms/d/e/YOUR_FORM_ID/viewform?embedded=true";
 
   return (
