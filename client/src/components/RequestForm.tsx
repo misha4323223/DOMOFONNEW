@@ -8,7 +8,7 @@ export function RequestForm() {
   // 4. Замените строку ниже на вашу ссылку
   // ============================================================================
   
-  const googleFormUrl = "https://docs.google.com/forms/d/e/YOUR_FORM_ID/viewform?embedded=true";
+  const googleFormUrl = "https://docs.google.com/forms/d/e/1FAIpQLScSO3weGn0GU23qVuIXFoARSsra0B2sYFjMEAuDsD6UNQd2_w/viewform?embedded=true";
 
   return (
     <section className="py-20 bg-background" id="request-form">
