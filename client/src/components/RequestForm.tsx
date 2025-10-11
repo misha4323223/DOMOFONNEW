@@ -31,11 +31,11 @@ export function RequestForm() {
             </div>
             
             {/* Google Form */}
-            <div className="relative bg-card" style={{ minHeight: '900px' }}>
+            <div className="relative bg-card" style={{ minHeight: '1400px' }}>
               <iframe
                 src={googleFormUrl}
                 width="100%"
-                height="900"
+                height="1400"
                 frameBorder="0"
                 marginHeight={0}
                 marginWidth={0}
