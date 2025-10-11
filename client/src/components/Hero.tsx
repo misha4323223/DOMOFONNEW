@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import heroImage from "@assets/stock_images/modern_video_interco_af170f0a.jpg";
+import heroImage from "@assets/stock_images/building_entrance_wi_a92d1f88.jpg";
 
 interface HeroProps {
   onRequestClick: () => void;
@@ -19,7 +19,7 @@ export function Hero({ onRequestClick }: HeroProps) {
           Домофонная служба | ИП Бухтеев
         </h1>
         <p className="text-xl md:text-2xl text-white/95 mb-8 leading-relaxed" data-testid="text-company-tagline">
-          Профессиональная установка и ремонт домофонных систем
+          Установка и тех. обслуживание домофонных систем
         </p>
         <Button 
           size="lg"
