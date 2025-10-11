@@ -12,7 +12,7 @@ export function Hero({ onRequestClick }: HeroProps) {
         className="absolute inset-0 bg-cover bg-center"
         style={{ backgroundImage: `url(${heroImage})` }}
       />
-      <div className="absolute inset-0 bg-gradient-to-r from-primary/90 to-primary/70" />
+      <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-primary/30" />
       
       <div className="relative z-10 max-w-4xl mx-auto px-6 text-center">
         <h1 className="text-5xl md:text-6xl font-bold text-white mb-6" data-testid="text-company-name">
