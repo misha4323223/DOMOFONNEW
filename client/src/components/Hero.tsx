@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import heroImage from "@assets/stock_images/building_entrance_wi_a92d1f88.jpg";
+import heroImage from "@assets/ChatGPT Image 11 окт. 2025 г., 15_53_08_1760187202805.png";
 
 interface HeroProps {
   onRequestClick: () => void;
