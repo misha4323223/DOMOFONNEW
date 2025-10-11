@@ -15,7 +15,7 @@ export function Hero({ onRequestClick }: HeroProps) {
       <div className="absolute inset-0 bg-gradient-to-r from-primary/50 to-primary/30" />
       
       <div className="relative z-10 max-w-4xl mx-auto px-6 text-center">
-        <h1 className="text-5xl md:text-6xl font-bold text-white mb-6" data-testid="text-company-name">
+        <h1 className="text-3xl md:text-4xl lg:text-5xl font-bold text-white mb-6" data-testid="text-company-name">
           Домофонная служба | ИП Бухтеев
         </h1>
         <p className="text-xl md:text-2xl text-white/95 mb-8 leading-relaxed" data-testid="text-company-tagline">
