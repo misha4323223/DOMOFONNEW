@@ -30,12 +30,12 @@ export function RequestForm() {
               </p>
             </div>
             
-            {/* Google Form */}
-            <div className="relative bg-card" style={{ minHeight: '1400px' }}>
+            {/* Google Form - обрезаем нижнюю часть с Google брендингом */}
+            <div className="relative bg-card overflow-hidden" style={{ height: '1300px' }}>
               <iframe
                 src={googleFormUrl}
                 width="100%"
-                height="1400"
+                height="1450"
                 frameBorder="0"
                 marginHeight={0}
                 marginWidth={0}
