@@ -39,7 +39,7 @@ jobs:
       - name: Deploy new container revision
         env:
           CONTAINER_ID: bbam40spnjv4cplmmjlv
-          SA_ID: ajej3pko57a1an1erl1
+          SA_ID: ajej3pko57a1lan1erl1
           REGISTRY_ID: crpp5mnmgd6ru4hap79f
           VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
           VK_PEER_ID: ${{ secrets.VK_PEER_ID }}
