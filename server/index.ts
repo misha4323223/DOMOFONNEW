@@ -40,12 +40,14 @@ app.use((req, res, next) => {
 (async () => {
   const server = await registerRoutes(app);
 
+  // Важно: НЕ бросаем err повторно — в Express 4 ошибка из error-middleware
+  // больше никем не ловится и уронит весь процесс (контейнер → 502).
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
 
+    console.error("Ошибка обработки запроса:", err);
     res.status(status).json({ message });
-    throw err;
   });
 
   // importantly only setup vite in development and after

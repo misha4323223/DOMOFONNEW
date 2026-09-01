@@ -27,61 +27,81 @@ async function getIamToken(): Promise<string> {
   return data.access_token;
 }
 
-async function docApi(path: string, body: unknown): Promise<unknown> {
+/**
+ * Запрос к Document API YDB по протоколу DynamoDB (HTTP).
+ * POST отправляется на сам endpoint (в нём уже зашит путь базы),
+ * операция задаётся заголовком X-Amz-Target.
+ */
+async function docApi(
+  target: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown> | undefined> {
   const token = await getIamToken();
-  const response = await fetch(`${DOCUMENT_API_ENDPOINT}${path}`, {
+  const response = await fetch(DOCUMENT_API_ENDPOINT, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
+      "X-Amz-Target": `DynamoDB_20120810.${target}`,
     },
     body: JSON.stringify(body),
   });
+  const text = await response.text();
   if (!response.ok) {
-    const text = await response.text();
     throw new Error(`YDB Document API ${response.status}: ${text.slice(0, 500)}`);
   }
-  return response.json();
+  if (!text) return undefined;
+  return JSON.parse(text) as Record<string, unknown>;
+}
+
+export function toDynamoItem(lead: Lead): Record<string, unknown> {
+  const item: Record<string, unknown> = {
+    id: { S: lead.id },
+    name: { S: lead.name },
+    phone: { S: lead.phone },
+    service: { S: lead.service },
+    address: { S: lead.address },
+    createdAt: { S: lead.createdAt },
+  };
+  if (lead.comment) {
+    item.comment = { S: lead.comment };
+  }
+  return item;
+}
+
+export function fromDynamoItem(
+  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
+): Lead {
+  return {
+    id: item.id?.S ?? "",
+    name: item.name?.S ?? "",
+    phone: item.phone?.S ?? "",
+    service: item.service?.S ?? "",
+    address: item.address?.S ?? "",
+    comment: item.comment?.S ?? null,
+    createdAt: item.createdAt?.S ?? "",
+  };
 }
 
 async function ensureTable(): Promise<void> {
   if (!tableReady) {
     tableReady = (async () => {
       try {
-        await docApi("/v1/createTable", {
-          path: TABLE_NAME,
-          primary_key: ["id"],
-          attributes: [
-            { name: "id", type: "string", not_null: true },
-            { name: "name", type: "string", not_null: true },
-            { name: "phone", type: "string", not_null: true },
-            { name: "service", type: "string", not_null: true },
-            { name: "address", type: "string", not_null: true },
-            { name: "comment", type: "string" },
-            { name: "createdAt", type: "string", not_null: true },
-          ],
+        await docApi("CreateTable", {
+          TableName: TABLE_NAME,
+          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
+          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes("already exists") && !message.includes("ALREADY_EXISTS")) {
+        // Таблица уже существует — это нормально
+        if (!message.includes("ResourceInUseException")) {
           throw error;
         }
       }
     })();
   }
   await tableReady;
-}
-
-function rowToLead(row: Record<string, unknown>): Lead {
-  return {
-    id: String(row.id),
-    name: String(row.name),
-    phone: String(row.phone),
-    service: String(row.service),
-    address: String(row.address),
-    comment: row.comment == null ? null : String(row.comment),
-    createdAt: String(row.createdAt),
-  };
 }
 
 export async function createYdbLead(input: InsertLead): Promise<Lead> {
@@ -95,43 +115,34 @@ export async function createYdbLead(input: InsertLead): Promise<Lead> {
     comment: input.comment ?? null,
     createdAt: new Date().toISOString(),
   };
-  await docApi("/v1/document", {
-    statements: [
-      {
-        type: "INSERT",
-        table: TABLE_NAME,
-        values: [lead],
-      },
-    ],
-  });
+  await docApi("PutItem", { TableName: TABLE_NAME, Item: toDynamoItem(lead) });
   return lead;
 }
 
 export async function listYdbLeads(): Promise<Lead[]> {
   await ensureTable();
-  const result = (await docApi("/v1/document", {
-    statements: [{ type: "SCAN", table: TABLE_NAME }],
-  })) as { result?: { rows?: Record<string, unknown>[] } };
-  return (result.result?.rows ?? [])
-    .map(rowToLead)
+  const result = (await docApi("Scan", { TableName: TABLE_NAME })) as
+    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
+    | undefined;
+  return (result?.Items ?? [])
+    .map((item) => fromDynamoItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export async function updateYdbLead(id: string, patch: Partial<InsertLead>): Promise<Lead | undefined> {
+export async function updateYdbLead(
+  id: string,
+  patch: Partial<InsertLead>,
+): Promise<Lead | undefined> {
   const leads = await listYdbLeads();
   const current = leads.find((lead) => lead.id === id);
   if (!current) return undefined;
   const updated: Lead = { ...current, ...patch, comment: patch.comment ?? current.comment };
-  await docApi("/v1/document", {
-    statements: [{ type: "UPDATE", table: TABLE_NAME, key: { id }, values: updated }],
-  });
+  await docApi("PutItem", { TableName: TABLE_NAME, Item: toDynamoItem(updated) });
   return updated;
 }
 
 export async function deleteYdbLead(id: string): Promise<boolean> {
   await ensureTable();
-  await docApi("/v1/document", {
-    statements: [{ type: "DELETE", table: TABLE_NAME, key: { id } }],
-  });
+  await docApi("DeleteItem", { TableName: TABLE_NAME, Key: { id: { S: id } } });
   return true;
 }

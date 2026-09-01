@@ -114,6 +114,20 @@ async function sendLeadToVk(lead: Lead): Promise<void> {
   }
 }
 
+/**
+ * Express 4 сам не ловит reject'ы асинхронных обработчиков — необработанный
+ * промис роняет весь процесс (Serverless Containers отдаёт 502). Оборачиваем
+ * каждый async-роут, чтобы ошибка уходила в error-middleware и клиент получал
+ * JSON-ответ, а контейнер оставался живым.
+ */
+function asyncHandler(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   if (!process.env.ADMIN_PASSWORD) {
     console.warn(
@@ -154,38 +168,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Список заявок — только для админа
-  app.get("/api/leads", requireAdmin, async (_req: Request, res: Response) => {
+  app.get("/api/leads", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
     const leads = await storage.listLeads();
     return res.json(leads);
-  });
+  }));
 
   // Обновление и удаление заявки — только для админа
-  app.patch("/api/leads/:id", requireAdmin, async (req: Request, res: Response) => {
+  app.patch("/api/leads/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
     const parsed = insertLeadSchema.partial().safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
     }
     const lead = await storage.updateLead(req.params.id, parsed.data);
     return lead ? res.json(lead) : res.status(404).json({ message: "Заявка не найдена" });
-  });
+  }));
 
-  app.delete("/api/leads/:id", requireAdmin, async (req: Request, res: Response) => {
+  app.delete("/api/leads/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
     const deleted = await storage.deleteLead(req.params.id);
     return deleted ? res.status(204).send() : res.status(404).json({ message: "Заявка не найдена" });
-  });
+  }));
 
   // Ручное добавление заявки из админки или мобильного приложения
-  app.post("/api/leads/admin", requireAdmin, async (req: Request, res: Response) => {
+  app.post("/api/leads/admin", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
     const parsed = insertLeadSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
     }
     const lead = await storage.createLead(parsed.data);
     return res.status(201).json(lead);
-  });
+  }));
 
   // Заявки на обслуживание
-  app.post("/api/leads", async (req: Request, res: Response) => {
+  app.post("/api/leads", asyncHandler(async (req: Request, res: Response) => {
     const parsed = insertLeadSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
@@ -202,7 +216,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     await sendLeadToVk(lead);
 
     return res.status(201).json(lead);
-  });
+  }));
 
   const httpServer = createServer(app);
 
