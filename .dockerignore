@@ -5,5 +5,8 @@ dist
 *.md
 .env
 .env.*
-attached_assets
 client/src/components/examples
+
+# Берём из attached_assets только hero-картинку, остальное не тащим в образ
+attached_assets/*
+!attached_assets/ChatGPT Image 11 окт. 2025 г., 15_53_08_1760187202805.png
