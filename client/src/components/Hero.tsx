@@ -23,7 +23,7 @@ export function Hero({ onRequestClick }: HeroProps) {
         </picture>
       </div>
 
-      <div className="w-full border-y bg-card flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 px-6 pt-12 pb-3 sm:py-3">
+      <div className="w-full border-y bg-card flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 px-6 mt-10 pt-14 pb-4 sm:mt-0 sm:py-3">
         <Button
           className="w-full sm:w-auto text-base px-7"
           onClick={onRequestClick}
