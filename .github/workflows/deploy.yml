@@ -43,6 +43,7 @@ jobs:
           REGISTRY_ID: crpp5mnmgd6ru4hap79f
           VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
           VK_PEER_ID: ${{ secrets.VK_PEER_ID }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
           IMAGE=cr.yandex/$REGISTRY_ID/domofon:latest
           yc serverless container revision deploy \
@@ -53,4 +54,4 @@ jobs:
             --memory 512MB \
             --service-account-id "$SA_ID" \
             --execution-timeout 60s \
-            --environment "VK_GROUP_TOKEN=$VK_GROUP_TOKEN,VK_PEER_ID=$VK_PEER_ID"
+            --environment "VK_GROUP_TOKEN=$VK_GROUP_TOKEN,VK_PEER_ID=$VK_PEER_ID,ADMIN_PASSWORD=$ADMIN_PASSWORD"

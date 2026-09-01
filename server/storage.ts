@@ -9,6 +9,7 @@ export interface IStorage {
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   createLead(lead: InsertLead): Promise<Lead>;
+  listLeads(): Promise<Lead[]>;
 }
 
 export class MemStorage implements IStorage {
@@ -47,6 +48,12 @@ export class MemStorage implements IStorage {
     };
     this.leads.set(id, lead);
     return lead;
+  }
+
+  async listLeads(): Promise<Lead[]> {
+    return Array.from(this.leads.values()).sort((a, b) =>
+      (b.createdAt || "").localeCompare(a.createdAt || ""),
+    );
   }
 }
 
