@@ -19,16 +19,17 @@ jobs:
       - name: Authenticate yc with service account key
         env:
           YC_SA_JSON: ${{ secrets.YC_SA_JSON }}
+          YC_FOLDER_ID: b1g74qv3u70jmct1ekvf
         run: |
           echo "$YC_SA_JSON" > /tmp/sa-key.json
           yc config profile create github
           yc config set service-account-key /tmp/sa-key.json
-          yc config set folder-id ${{ vars.YC_FOLDER_ID }}
+          yc config set folder-id "$YC_FOLDER_ID"
           yc container registry configure-docker
 
       - name: Build and push image
         env:
-          REGISTRY_ID: ${{ vars.YC_REGISTRY_ID }}
+          REGISTRY_ID: crpp5mnmgd6ru4hap79f
         run: |
           IMAGE=cr.yandex/$REGISTRY_ID/domofon
           docker build -t $IMAGE:latest -t $IMAGE:${{ github.sha }} .
