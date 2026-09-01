@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Домофонная служба",
+    "slug": "domofon-admin",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      "expo-notifications"
+    ],
+    "android": {
+      "package": "ru.obzor71.admin",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0a0a",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "01a13674-a633-47ca-ae30-865da95251c1"
+      }
+    },
+    "owner": "misha1900"
+  }
+}

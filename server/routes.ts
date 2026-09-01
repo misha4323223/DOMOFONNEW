@@ -3,6 +3,9 @@ import { createServer, type Server } from "http";
 import { randomBytes } from "crypto";
 import { storage } from "./storage";
 import { insertLeadSchema, type Lead } from "@shared/schema";
+import { SERVICE_LABELS } from "@shared/services";
+import { notifyNewLead } from "./push";
+import { saveDeviceToken, removeDeviceToken } from "./ydb";
 
 // --- Админка: простая авторизация по паролю ---
 // Пароль задаётся переменной окружения ADMIN_PASSWORD.
@@ -30,8 +33,22 @@ function getCookie(req: Request, name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Токен сессии: из заголовка Authorization: Bearer <token>
+ * (так ходит мобильное приложение — у React Native fetch нет cookie-менеджера)
+ * или из cookie admin_token (браузерная админка).
+ */
+function getSessionToken(req: Request): string | undefined {
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith("Bearer ")) {
+    const token = auth.slice(7).trim();
+    if (token) return token;
+  }
+  return getCookie(req, ADMIN_COOKIE);
+}
+
 function isAuthed(req: Request): boolean {
-  const token = getCookie(req, ADMIN_COOKIE);
+  const token = getSessionToken(req);
   if (!token) return false;
   const expiresAt = adminTokens.get(token);
   if (!expiresAt) return false;
@@ -49,12 +66,6 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-export const SERVICE_LABELS: Record<string, string> = {
-  install: "Установка домофона",
-  repair: "Ремонт / не работает",
-  maintenance: "Обслуживание",
-  consult: "Консультация",
-};
 
 /**
  * Отправка уведомления о новой заявке в личные сообщения ВКонтакте.
@@ -153,11 +164,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       maxAge: SESSION_TTL_MS,
       path: "/",
     });
-    return res.json({ ok: true });
+    return res.json({ ok: true, token });
   });
 
   app.post("/api/admin/logout", (req: Request, res: Response) => {
-    const token = getCookie(req, ADMIN_COOKIE);
+    const token = getSessionToken(req);
     if (token) adminTokens.delete(token);
     res.clearCookie(ADMIN_COOKIE, { path: "/" });
     return res.json({ ok: true });
@@ -165,6 +176,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/admin/me", (req: Request, res: Response) => {
     return res.json({ authed: isAuthed(req) });
+  });
+
+  // Регистрация push-токена мобильного приложения (Expo)
+  app.post("/api/admin/push-token", requireAdmin, (req: Request, res: Response) => {
+    const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    if (!token || !token.startsWith("ExponentPushToken")) {
+      return res.status(400).json({ message: "Некорректный push-токен" });
+    }
+    saveDeviceToken(token).catch((err) =>
+      console.error("Не удалось сохранить push-токен:", err),
+    );
+    return res.json({ ok: true });
+  });
+
+  // Удаление push-токена (при выходе из приложения)
+  app.delete("/api/admin/push-token", requireAdmin, (req: Request, res: Response) => {
+    const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    if (!token) {
+      return res.status(400).json({ message: "Некорректный push-токен" });
+    }
+    removeDeviceToken(token).catch((err) =>
+      console.error("Не удалось удалить push-токен:", err),
+    );
+    return res.json({ ok: true });
   });
 
   // Список заявок — только для админа
@@ -195,6 +230,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
     }
     const lead = await storage.createLead(parsed.data);
+    // Оповестить телефоны (пожаробезопасно: ошибка push не ломает ответ)
+    await notifyNewLead(lead).catch((err) =>
+      console.error("Ошибка отправки push:", err),
+    );
     return res.status(201).json(lead);
   }));
 
@@ -212,8 +251,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     console.log("Новая заявка получена:", JSON.stringify(lead, null, 2));
 
-    // Отправка в ВК (пожаробезопасно: при ошибке заявка уже сохранена)
-    await sendLeadToVk(lead);
+    // Push на телефоны и отправка в ВК (оба пожаробезопасны: при ошибке заявка уже сохранена)
+    await Promise.allSettled([notifyNewLead(lead), sendLeadToVk(lead)]);
 
     return res.status(201).json(lead);
   }));

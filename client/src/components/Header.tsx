@@ -28,9 +28,14 @@ export function Header({ onRequestClick }: HeaderProps) {
       <div className="max-w-7xl mx-auto px-6">
         <div className="flex items-center justify-between h-16">
           <div className="flex items-center gap-2">
-            <h1 className="text-lg font-bold" data-testid="text-header-logo">
-              Домофонная служба
-            </h1>
+            <div className="leading-tight">
+              <h1 className="text-lg font-bold" data-testid="text-header-logo">
+                Домофонная служба
+              </h1>
+              <p className="text-xs text-muted-foreground" data-testid="text-header-legal">
+                ИП Бухтеев
+              </p>
+            </div>
           </div>
 
           {/* Desktop Navigation */}

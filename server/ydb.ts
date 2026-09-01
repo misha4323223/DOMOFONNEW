@@ -146,3 +146,62 @@ export async function deleteYdbLead(id: string): Promise<boolean> {
   await docApi("DeleteItem", { TableName: TABLE_NAME, Key: { id: { S: id } } });
   return true;
 }
+
+// --- Push-токены мобильного приложения (таблица devices) ---
+
+const DEVICES_TABLE = "devices";
+
+let devicesTableReady: Promise<void> | undefined;
+
+async function ensureDevicesTable(): Promise<void> {
+  if (!devicesTableReady) {
+    devicesTableReady = (async () => {
+      try {
+        await docApi("CreateTable", {
+          TableName: DEVICES_TABLE,
+          AttributeDefinitions: [{ AttributeName: "token", AttributeType: "S" }],
+          KeySchema: [{ AttributeName: "token", KeyType: "HASH" }],
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Таблица уже существует — это нормально
+        if (!message.includes("ResourceInUseException")) {
+          throw error;
+        }
+      }
+    })();
+  }
+  await devicesTableReady;
+}
+
+/** Сохранить (или обновить) push-токен устройства. */
+export async function saveDeviceToken(token: string): Promise<void> {
+  await ensureDevicesTable();
+  await docApi("PutItem", {
+    TableName: DEVICES_TABLE,
+    Item: {
+      token: { S: token },
+      registeredAt: { S: new Date().toISOString() },
+    },
+  });
+}
+
+/** Список всех push-токенов устройств. */
+export async function listDeviceTokens(): Promise<string[]> {
+  await ensureDevicesTable();
+  const result = (await docApi("Scan", { TableName: DEVICES_TABLE })) as
+    | { Items?: Array<Record<string, { S?: string }>> }
+    | undefined;
+  return (result?.Items ?? [])
+    .map((item) => item.token?.S)
+    .filter((t): t is string => Boolean(t));
+}
+
+/** Удалить push-токен устройства (например, при выходе из приложения). */
+export async function removeDeviceToken(token: string): Promise<void> {
+  await ensureDevicesTable();
+  await docApi("DeleteItem", {
+    TableName: DEVICES_TABLE,
+    Key: { token: { S: token } },
+  });
+}

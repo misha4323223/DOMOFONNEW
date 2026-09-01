@@ -175,47 +175,74 @@ function LeadsTable() {
                 </p>
               </div>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Дата</TableHead>
-                    <TableHead>Имя</TableHead>
-                    <TableHead>Телефон</TableHead>
-                    <TableHead>Услуга</TableHead>
-                    <TableHead>Адрес</TableHead>
-                    <TableHead>Комментарий</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
+              <>
+                {/* Мобильная версия: карточки вместо таблицы */}
+                <div className="md:hidden divide-y divide-border">
                   {leads.map((lead) => (
-                    <TableRow key={lead.id}>
-                      <TableCell className="whitespace-nowrap text-muted-foreground">
-                        {formatDate(lead.createdAt)}
-                      </TableCell>
-                      <TableCell className="font-medium">{lead.name}</TableCell>
-                      <TableCell>
-                        <a
-                          href={`tel:${lead.phone}`}
-                          className="text-primary hover:underline whitespace-nowrap"
-                        >
-                          {lead.phone}
-                        </a>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary">
+                    <div key={lead.id} className="p-4 space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <span className="font-medium">{lead.name}</span>
+                        <Badge variant="secondary" className="shrink-0">
                           {SERVICE_LABELS[lead.service] ?? lead.service}
                         </Badge>
-                      </TableCell>
-                      <TableCell className="max-w-[220px] truncate" title={lead.address}>
-                        {lead.address}
-                      </TableCell>
-                      <TableCell className="max-w-[240px] text-muted-foreground">
-                        {lead.comment || "—"}
-                      </TableCell>
-                    </TableRow>
+                      </div>
+                      <a href={`tel:${lead.phone}`} className="text-primary hover:underline block">
+                        {lead.phone}
+                      </a>
+                      <p className="text-sm">{lead.address}</p>
+                      {lead.comment && (
+                        <p className="text-sm text-muted-foreground">{lead.comment}</p>
+                      )}
+                      <p className="text-xs text-muted-foreground">{formatDate(lead.createdAt)}</p>
+                    </div>
                   ))}
-                </TableBody>
-              </Table>
+                </div>
+
+                {/* Десктопная версия: таблица с горизонтальным скроллом на всякий случай */}
+                <div className="hidden md:block overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Дата</TableHead>
+                        <TableHead>Имя</TableHead>
+                        <TableHead>Телефон</TableHead>
+                        <TableHead>Услуга</TableHead>
+                        <TableHead>Адрес</TableHead>
+                        <TableHead>Комментарий</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {leads.map((lead) => (
+                        <TableRow key={lead.id}>
+                          <TableCell className="whitespace-nowrap text-muted-foreground">
+                            {formatDate(lead.createdAt)}
+                          </TableCell>
+                          <TableCell className="font-medium">{lead.name}</TableCell>
+                          <TableCell>
+                            <a
+                              href={`tel:${lead.phone}`}
+                              className="text-primary hover:underline whitespace-nowrap"
+                            >
+                              {lead.phone}
+                            </a>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="secondary">
+                              {SERVICE_LABELS[lead.service] ?? lead.service}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="max-w-[220px] truncate" title={lead.address}>
+                            {lead.address}
+                          </TableCell>
+                          <TableCell className="max-w-[240px] text-muted-foreground">
+                            {lead.comment || "—"}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>

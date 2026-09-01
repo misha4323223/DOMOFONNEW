@@ -212,8 +212,8 @@ export function RequestForm() {
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2">
                     <p className="text-sm text-muted-foreground">
                       Или позвоните напрямую:{" "}
-                      <a href="tel:+7XXXXXXXXXX" className="font-medium text-primary hover:underline">
-                        +7 (XXX) XXX-XX-XX
+                      <a href="tel:+79056298708" className="font-medium text-primary hover:underline">
+                        +7 (905) 629-87-08
                       </a>
                     </p>
                     <Button

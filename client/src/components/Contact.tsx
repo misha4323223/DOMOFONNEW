@@ -1,29 +1,17 @@
-import { MapPin, Phone, Mail, Clock } from "lucide-react";
+import { Phone, Clock } from "lucide-react";
 
 export function Contact() {
   const contactInfo = [
     {
       icon: Phone,
       title: "Телефон",
-      value: "+7 (XXX) XXX-XX-XX",
-      link: "tel:+7XXXXXXXXXX"
-    },
-    {
-      icon: Mail,
-      title: "Email",
-      value: "info@domofon-service.ru",
-      link: "mailto:info@domofon-service.ru"
-    },
-    {
-      icon: MapPin,
-      title: "Адрес",
-      value: "г. [Ваш город], ул. [Адрес]",
-      link: null
+      value: "+7 (905) 629-87-08",
+      link: "tel:+79056298708"
     },
     {
       icon: Clock,
       title: "Режим работы",
-      value: "Пн-Пт: 9:00 - 18:00, Сб: 10:00 - 15:00",
+      value: "Пн-Пт: 9:00 - 18:00",
       link: null
     }
   ];
@@ -38,11 +26,11 @@ export function Contact() {
           </p>
         </div>
 
-        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid sm:grid-cols-2 gap-6 max-w-2xl mx-auto">
           {contactInfo.map((item, index) => (
             <div
               key={index}
-              className="bg-card p-6 rounded-md border hover-elevate transition-all duration-300"
+              className="bg-card p-6 rounded-2xl border hover-elevate shadow-sm transition-all duration-300"
               data-testid={`card-contact-${index}`}
             >
               <div className="w-12 h-12 rounded-md bg-primary/10 flex items-center justify-center mb-4">
