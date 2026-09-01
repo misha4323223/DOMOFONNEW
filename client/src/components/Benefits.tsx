@@ -1,11 +1,12 @@
 import { Shield, Clock, Award } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
 
 export function Benefits() {
   const benefits = [
     {
       icon: Shield,
       title: "Гарантия качества",
-      description: "Все работы выполняются с последующем обслуживанием. Используем только проверенные оборудования."
+      description: "Все работы выполняются с последующим обслуживанием. Используем только проверенное оборудование."
     },
     {
       icon: Clock,
@@ -31,19 +32,17 @@ export function Benefits() {
 
         <div className="grid md:grid-cols-3 gap-8">
           {benefits.map((benefit, index) => (
-            <div 
-              key={index}
-              className="text-center"
-              data-testid={`card-benefit-${index}`}
-            >
-              <div className="w-16 h-16 rounded-md bg-primary/10 flex items-center justify-center mx-auto mb-6">
-                <benefit.icon className="h-8 w-8 text-primary" />
-              </div>
-              <h3 className="text-xl font-semibold mb-3">{benefit.title}</h3>
-              <p className="text-muted-foreground leading-relaxed">
-                {benefit.description}
-              </p>
-            </div>
+            <Card key={index} className="hover-elevate transition-all duration-300" data-testid={`card-benefit-${index}`}>
+              <CardContent className="pt-8 text-center">
+                <div className="w-16 h-16 rounded-md bg-primary/10 flex items-center justify-center mx-auto mb-6">
+                  <benefit.icon className="h-8 w-8 text-primary" />
+                </div>
+                <h3 className="text-xl font-semibold mb-3">{benefit.title}</h3>
+                <p className="text-muted-foreground leading-relaxed">
+                  {benefit.description}
+                </p>
+              </CardContent>
+            </Card>
           ))}
         </div>
       </div>

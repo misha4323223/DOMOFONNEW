@@ -6,7 +6,7 @@ export function Services() {
     {
       icon: Settings,
       title: "Установка домофонов",
-      description: "",
+      description: "Подберём и смонтируем систему под ваш дом — от одной квартиры до целого подъезда.",
       features: [
         "Видеодомофоны",
         "Аудиодомофоны",
@@ -17,7 +17,7 @@ export function Services() {
     {
       icon: Wrench,
       title: "Ремонт и обслуживание",
-      description: "",
+      description: "Быстро найдём причину неисправности и вернём систему в строй с гарантией на работу.",
       features: [
         "Диагностика неисправностей",
         "Замена компонентов",
@@ -39,8 +39,8 @@ export function Services() {
 
         <div className="grid md:grid-cols-2 gap-8">
           {services.map((service, index) => (
-            <Card 
-              key={index} 
+            <Card
+              key={index}
               className="hover-elevate transition-all duration-300"
               data-testid={`card-service-${index}`}
             >

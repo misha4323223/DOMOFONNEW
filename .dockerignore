@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+.gitignore
+*.md
+.env
+.env.*
+attached_assets
+client/src/components/examples

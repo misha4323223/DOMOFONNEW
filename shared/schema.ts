@@ -14,5 +14,25 @@ export const insertUserSchema = createInsertSchema(users).pick({
   password: true,
 });
 
+export const leads = pgTable("leads", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  phone: text("phone").notNull(),
+  service: text("service").notNull(),
+  address: text("address").notNull(),
+  comment: text("comment"),
+  createdAt: text("created_at").notNull().default(sql`now()`),
+});
+
+export const insertLeadSchema = createInsertSchema(leads).omit({
+  id: true,
+  createdAt: true,
+}).extend({
+  comment: z.string().nullish(),
+});
+
+export type InsertLead = z.infer<typeof insertLeadSchema>;
+export type Lead = typeof leads.$inferSelect;
+
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;

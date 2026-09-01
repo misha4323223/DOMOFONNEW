@@ -1,0 +1,36 @@
+name: Build & push image to Yandex Cloud
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Yandex Cloud CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+
+      - name: Authenticate yc with service account key
+        env:
+          YC_SA_JSON: ${{ secrets.YC_SA_JSON }}
+        run: |
+          echo "$YC_SA_JSON" > /tmp/sa-key.json
+          yc config profile create github
+          yc config set service-account-key /tmp/sa-key.json
+          yc config set folder-id ${{ vars.YC_FOLDER_ID }}
+          yc container registry configure-docker
+
+      - name: Build and push image
+        env:
+          REGISTRY_ID: ${{ vars.YC_REGISTRY_ID }}
+        run: |
+          IMAGE=cr.yandex/$REGISTRY_ID/domofon
+          docker build -t $IMAGE:latest -t $IMAGE:${{ github.sha }} .
+          docker push $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
