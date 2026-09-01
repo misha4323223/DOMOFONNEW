@@ -54,4 +54,4 @@ jobs:
             --memory 512MB \
             --service-account-id "$SA_ID" \
             --execution-timeout 60s \
-            --environment "VK_GROUP_TOKEN=$VK_GROUP_TOKEN,VK_PEER_ID=$VK_PEER_ID,ADMIN_PASSWORD=$ADMIN_PASSWORD"
+            --environment "VK_GROUP_TOKEN=$VK_GROUP_TOKEN,VK_PEER_ID=$VK_PEER_ID,ADMIN_PASSWORD=$ADMIN_PASSWORD,YDB_DATABASE_PATH=/ru-central1/b1gpj9488h3k7oaa3foh/etn1ah45qvisdme7mftg,YDB_DOCUMENT_API_ENDPOINT=https://docapi.serverless.yandexcloud.net/ru-central1/b1gpj9488h3k7oaa3foh/etn1ah45qvisdme7mftg"

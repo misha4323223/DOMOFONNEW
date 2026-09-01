@@ -159,6 +159,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.json(leads);
   });
 
+  // Обновление и удаление заявки — только для админа
+  app.patch("/api/leads/:id", requireAdmin, async (req: Request, res: Response) => {
+    const parsed = insertLeadSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
+    }
+    const lead = await storage.updateLead(req.params.id, parsed.data);
+    return lead ? res.json(lead) : res.status(404).json({ message: "Заявка не найдена" });
+  });
+
+  app.delete("/api/leads/:id", requireAdmin, async (req: Request, res: Response) => {
+    const deleted = await storage.deleteLead(req.params.id);
+    return deleted ? res.status(204).send() : res.status(404).json({ message: "Заявка не найдена" });
+  });
+
+  // Ручное добавление заявки из админки или мобильного приложения
+  app.post("/api/leads/admin", requireAdmin, async (req: Request, res: Response) => {
+    const parsed = insertLeadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
+    }
+    const lead = await storage.createLead(parsed.data);
+    return res.status(201).json(lead);
+  });
+
   // Заявки на обслуживание
   app.post("/api/leads", async (req: Request, res: Response) => {
     const parsed = insertLeadSchema.safeParse(req.body);

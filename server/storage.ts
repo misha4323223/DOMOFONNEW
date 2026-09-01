@@ -1,8 +1,6 @@
 import { type User, type InsertUser, type Lead, type InsertLead } from "@shared/schema";
 import { randomUUID } from "crypto";
-
-// modify the interface with any CRUD methods
-// you might need
+import { createYdbLead, listYdbLeads, updateYdbLead, deleteYdbLead } from "./ydb";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -10,50 +8,60 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
   createLead(lead: InsertLead): Promise<Lead>;
   listLeads(): Promise<Lead[]>;
+  updateLead(id: string, patch: Partial<InsertLead>): Promise<Lead | undefined>;
+  deleteLead(id: string): Promise<boolean>;
 }
 
 export class MemStorage implements IStorage {
-  private users: Map<string, User>;
-  private leads: Map<string, Lead>;
-
-  constructor() {
-    this.users = new Map();
-    this.leads = new Map();
-  }
+  private users = new Map<string, User>();
+  private leads = new Map<string, Lead>();
+  private useYdb = Boolean(process.env.YDB_DATABASE_PATH);
 
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
+    return Array.from(this.users.values()).find((user) => user.username === username);
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
+    const user: User = { ...insertUser, id: randomUUID() };
+    this.users.set(user.id, user);
     return user;
   }
 
   async createLead(insertLead: InsertLead): Promise<Lead> {
-    const id = randomUUID();
+    if (this.useYdb) return createYdbLead(insertLead);
     const lead: Lead = {
       ...insertLead,
       comment: insertLead.comment ?? null,
-      id,
+      id: randomUUID(),
       createdAt: new Date().toISOString(),
     };
-    this.leads.set(id, lead);
+    this.leads.set(lead.id, lead);
     return lead;
   }
 
   async listLeads(): Promise<Lead[]> {
+    if (this.useYdb) return listYdbLeads();
     return Array.from(this.leads.values()).sort((a, b) =>
       (b.createdAt || "").localeCompare(a.createdAt || ""),
     );
+  }
+
+  async updateLead(id: string, patch: Partial<InsertLead>): Promise<Lead | undefined> {
+    if (this.useYdb) return updateYdbLead(id, patch);
+    const current = this.leads.get(id);
+    if (!current) return undefined;
+    const updated: Lead = { ...current, ...patch, comment: patch.comment ?? current.comment };
+    this.leads.set(id, updated);
+    return updated;
+  }
+
+  async deleteLead(id: string): Promise<boolean> {
+    if (this.useYdb) return deleteYdbLead(id);
+    return this.leads.delete(id);
   }
 }
 
