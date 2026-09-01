@@ -1,6 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
-import { setupVite, serveStatic, log } from "./vite";
+import { log } from "./log";
+import { serveStatic } from "./serve-static";
 
 const app = express();
 app.use(express.json());
@@ -51,6 +52,9 @@ app.use((req, res, next) => {
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
   if (app.get("env") === "development") {
+    // vite подключаем только в dev: статический импорт сломал бы прод-образ,
+    // где vite отсутствует (он в devDependencies)
+    const { setupVite } = await import("./vite");
     await setupVite(app, server);
   } else {
     serveStatic(app);
