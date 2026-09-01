@@ -35,3 +35,22 @@ jobs:
           docker build -t $IMAGE:latest -t $IMAGE:${{ github.sha }} .
           docker push $IMAGE:latest
           docker push $IMAGE:${{ github.sha }}
+
+      - name: Deploy new container revision
+        env:
+          CONTAINER_ID: bbam40spnjv4cplmmjlv
+          SA_ID: ajej3pko57a1an1erl1
+          REGISTRY_ID: crpp5mnmgd6ru4hap79f
+          VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
+          VK_PEER_ID: ${{ secrets.VK_PEER_ID }}
+        run: |
+          IMAGE=cr.yandex/$REGISTRY_ID/domofon:latest
+          yc serverless container revision deploy \
+            --container-id "$CONTAINER_ID" \
+            --image "$IMAGE" \
+            --cores 1 \
+            --core-fraction 20 \
+            --memory 512MB \
+            --service-account-id "$SA_ID" \
+            --execution-timeout 60s \
+            --environment "VK_GROUP_TOKEN=$VK_GROUP_TOKEN,VK_PEER_ID=$VK_PEER_ID"
