@@ -4,8 +4,10 @@ import { log } from "./log";
 import { serveStatic } from "./serve-static";
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+// Лимит 12 МБ нужен эндпоинту /api/admin/scan — туда приходит фото
+// блокнота в base64 (внутри эндпоинта уже есть своя проверка размера).
+app.use(express.json({ limit: "12mb" }));
+app.use(express.urlencoded({ extended: false, limit: "2mb" }));
 
 app.use((req, res, next) => {
   const start = Date.now();
