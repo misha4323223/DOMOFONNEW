@@ -32,7 +32,9 @@ async function request(
     headers["Content-Type"] = "application/json";
   }
   if (options.token) {
-    headers["Authorization"] = `Bearer ${options.token}`;
+    // X-Admin-Token, а не Authorization: Yandex API Gateway на домене
+    // не пропускает заголовок Authorization и отвечает на него 403.
+    headers["X-Admin-Token"] = options.token;
   }
 
   const res = await fetch(`${API_BASE}${path}`, {

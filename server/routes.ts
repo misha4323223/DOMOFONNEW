@@ -34,11 +34,13 @@ function getCookie(req: Request, name: string): string | undefined {
 }
 
 /**
- * Токен сессии: из заголовка Authorization: Bearer <token>
- * (так ходит мобильное приложение — у React Native fetch нет cookie-менеджера)
+ * Токен сессии: из заголовка X-Admin-Token (так ходит мобильное приложение —
+ * Yandex API Gateway не пропускает заголовок Authorization в интеграцию)
  * или из cookie admin_token (браузерная админка).
  */
 function getSessionToken(req: Request): string | undefined {
+  const custom = req.headers["x-admin-token"];
+  if (typeof custom === "string" && custom.trim()) return custom.trim();
   const auth = req.headers.authorization;
   if (auth && auth.startsWith("Bearer ")) {
     const token = auth.slice(7).trim();
