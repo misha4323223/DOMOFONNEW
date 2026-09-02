@@ -9,7 +9,10 @@
  * указанный в x-folder-id (по умолчанию — каталог, где живёт YDB).
  */
 
-const FOLDER_ID = process.env.YC_FOLDER_ID ?? "b1gpj9488h3k7oaa3foh";
+// Yandex Vision требует, чтобы x-folder-id совпадал с каталогом сервис-аккаунта
+// контейнера (b1g74qv3u70jmct1ekvf). Каталог YDB (b1gpj9488h3k7oaa3foh) тут не подойдёт —
+// контейнер ответит "folder ID does not match".
+const FOLDER_ID = process.env.YC_FOLDER_ID ?? "b1g74qv3u70jmct1ekvf";
 
 const OCR_ENDPOINT = "https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText";
 
