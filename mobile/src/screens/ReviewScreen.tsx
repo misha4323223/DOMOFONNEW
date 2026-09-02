@@ -84,11 +84,16 @@ export function ReviewScreen({ token, candidates, fullText, onDone, onBack }: Pr
       />
 
       <Text style={styles.label}>Телефон</Text>
+      {item.phone.trim() === "" ? (
+        <View style={styles.noPhoneBadge}>
+          <Text style={styles.noPhoneBadgeText}>⚠ Без телефона — номер не распознан, впишите вручную</Text>
+        </View>
+      ) : null}
       <TextInput
         style={styles.input}
         value={item.phone}
         onChangeText={(v) => update(index, { phone: v })}
-        placeholder="+7 ___ ___-__-__"
+        placeholder={item.phone.trim() === "" ? "Номер не распознан — впишите вручную" : "+7 ___ ___-__-__"}
         placeholderTextColor={colors.textMuted}
         keyboardType="phone-pad"
       />
@@ -286,6 +291,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     marginTop: 4,
+  },
+  noPhoneBadge: {
+    backgroundColor: "rgba(239,68,68,0.12)",
+    borderColor: "#ef4444",
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  noPhoneBadgeText: {
+    color: "#ef4444",
+    fontSize: 12,
+    fontWeight: "600",
   },
   input: {
     backgroundColor: colors.inputBg,

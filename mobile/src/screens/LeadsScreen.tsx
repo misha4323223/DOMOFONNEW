@@ -183,7 +183,11 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan }: Props) {
       </View>
       <View style={styles.cardRow}>
         <Text style={styles.cardLabel}>📞 </Text>
-        <Text style={styles.cardPhone}>{item.phone}</Text>
+        {item.phone ? (
+          <Text style={styles.cardPhone}>{item.phone}</Text>
+        ) : (
+          <Text style={styles.cardPhoneMissing}>Без телефона ⚠</Text>
+        )}
       </View>
       <View style={styles.chipRow}>
         <View style={styles.chip}>
@@ -376,6 +380,11 @@ const styles = StyleSheet.create({
   cardPhone: {
     color: colors.primary,
     fontSize: 16,
+    fontWeight: "700",
+  },
+  cardPhoneMissing: {
+    color: colors.destructive,
+    fontSize: 15,
     fontWeight: "700",
   },
   chipRow: {

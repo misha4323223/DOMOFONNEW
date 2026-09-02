@@ -2,14 +2,18 @@
  * Парсинг распознанного текста страницы блокнота в кандидатов заявок.
  *
  * Блокнот обычно заполняется колонками: город, адрес, что случилось, телефон —
- * каждый на своей строке. Поэтому кандидат собирается из ГРУППЫ строк:
- * всё, что встретилось между двумя строками с телефонами, относится к заявке
- * с ближайшим (следующим за ними) телефоном.
+ * каждый на своей строке. Поэтому заявка (запись) собирается из ГРУППЫ строк.
  *
- * Правила:
- * - строка с телефоном начинает кандидата (телефон — главное поле);
- * - строки до телефона (город/адрес/комментарий) прикрепляются к кандидату;
- * - строки-«города» (только буквы) и адреса (ул., кв., дом и т.п.) — в адрес;
+ * Границы записи:
+ * - строка-«город» (только буквы, например «Шекино») — начало новой записи;
+ * - строка с телефоном — телефон прикрепляется к текущей записи; если у текущей
+ *   записи телефон уже есть — это уже следующая заявка.
+ *
+ * Запись БЕЗ телефона не выбрасывается: она становится кандидатом с пустым
+ * телефоном — на экране проверки она помечается «Без телефона», и её не теряют.
+ *
+ * Правила разбора полей:
+ * - города и адреса (ул., кв., дом и т.п.) — в адрес;
  * - остаток — комментарий; имя заполняется на экране проверки вручную;
  * - даты и цены из полей вырезаются;
  * - дубли телефонов убираются.
@@ -21,7 +25,7 @@ export interface LeadCandidate {
   address: string;
   service: string | null;
   comment: string;
-  /** Исходная строка с телефоном — для сверки на экране проверки. */
+  /** Исходный текст записи — для сверки на экране проверки. */
   raw: string;
 }
 
@@ -45,9 +49,14 @@ const ADDRESS_RE =
 const APARTMENT_RE =
   /(?<![а-яёa-z0-9])(?:кв\.?|квартира|подъезд|этаж)(?![а-яёa-zA-Z0-9])/i;
 
-/** Строка-«город»: только буквы (например: Шекино, Ефремов, Богородецк). */
+/**
+ * Строка-«город»: одно слово только из букв (Шекино, Ефремов, Богородецк).
+ * Комментарии (»трубка», «замыкание», «сломался доводчик») сюда не попадают,
+ * потому что либо состоят из нескольких слов, либо стоят ДО телефона —
+ * город начинает НОВУЮ запись только после завершённой (см. parseCandidates).
+ */
 function isCityLine(value: string): boolean {
-  return /^[а-яёА-ЯЁ][а-яёА-ЯЁ\- ]*$/.test(value) && value.length >= 2;
+  return /^[а-яёА-ЯЁ]{2,}$/.test(value);
 }
 
 const SERVICE_KEYWORDS: { value: string; keys: RegExp }[] = [
@@ -91,9 +100,10 @@ function detectService(text: string): string | null {
 }
 
 /**
- * Собирает кандидата из контекста: строк до телефона + остаток строки с телефоном.
+ * Собирает кандидата из контекста записи.
  * city — первая строка-«город»; адрес — строки с адресными словами/кв;
  * остальное — комментарий. Имя оставляем пустым: его заполняют на экране проверки.
+ * phone может быть пустой строкой — тогда это запись «без телефона».
  */
 function buildCandidate(
   context: string[],
@@ -112,7 +122,8 @@ function buildCandidate(
     } else if (ADDRESS_RE.test(line) || APARTMENT_RE.test(line)) {
       addressParts.push(line);
     } else {
-      rest.push(line);
+      const cleaned = stripJunk(line);
+      if (cleaned) rest.push(cleaned);
     }
   }
 
@@ -125,11 +136,41 @@ function buildCandidate(
   return { name: "", phone, address, service, comment, raw };
 }
 
+interface RawRecord {
+  context: string[];
+  phone: string;
+  rawPhoneLine: string;
+}
+
 export function parseCandidates(lines: string[]): LeadCandidate[] {
   const seen = new Set<string>();
   const candidates: LeadCandidate[] = [];
-  // Строки, встретившиеся после прошлого телефона — контекст следующего кандидата
-  let context: string[] = [];
+  let current: RawRecord | null = null;
+
+  const closeCurrent = () => {
+    if (!current) return;
+    const { context, phone, rawPhoneLine } = current;
+
+    // Запись без телефона создаём только при наличии адресного ориентира
+    // (ул./кв./дом) — иначе это мусорный текст (цены, товары) без привязки.
+    if (!phone) {
+      const hasAddressHint = context.some(
+        (l) => ADDRESS_RE.test(l) || APARTMENT_RE.test(l),
+      );
+      if (!hasAddressHint) {
+        current = null;
+        return;
+      }
+    }
+
+    // Записи с телефоном — только уникальные; без телефона — всегда
+    if (!phone || !seen.has(phone)) {
+      if (phone) seen.add(phone);
+      const raw = rawPhoneLine || clean(context.join(" ")) || "(без текста)";
+      candidates.push(buildCandidate(context, phone, raw));
+    }
+    current = null;
+  };
 
   for (const rawLine of lines) {
     const line = clean(rawLine);
@@ -137,25 +178,37 @@ export function parseCandidates(lines: string[]): LeadCandidate[] {
 
     const phoneMatch = line.match(PHONE_RE);
 
-    if (!phoneMatch) {
-      context.push(line);
+    if (phoneMatch) {
+      // У текущей записи уже есть телефон — строка начала следующую заявку
+      if (current && current.phone) closeCurrent();
+      if (!current) current = { context: [], phone: "", rawPhoneLine: rawLine };
+      if (!current.phone) {
+        current.phone = normalizePhone(phoneMatch[0]);
+        current.rawPhoneLine = rawLine;
+        const beforeText = clean(line.slice(0, phoneMatch.index));
+        if (beforeText) current.context.push(beforeText);
+        const afterText = stripJunk(
+          line.slice(phoneMatch.index! + phoneMatch[0].length),
+        );
+        if (afterText) current.context.push(afterText);
+      }
       continue;
     }
 
-    const phone = normalizePhone(phoneMatch[0]);
-    if (!seen.has(phone)) {
-      seen.add(phone);
-
-      const beforeText = clean(line.slice(0, phoneMatch.index));
-      const afterText = stripJunk(line.slice(phoneMatch.index! + phoneMatch[0].length));
-      const ctx = [...context];
-      if (beforeText) ctx.push(beforeText);
-      if (afterText) ctx.push(afterText);
-
-      candidates.push(buildCandidate(ctx, phone, rawLine));
+    // Строка-«город» — начало новой записи, но ТОЛЬКО если предыдущая
+    // запись уже завершена телефоном (иначе это может быть однословный
+    // комментарий вроде «трубка», стоящий до телефона)
+    if (isCityLine(line)) {
+      if (current && current.phone) closeCurrent();
+      if (!current) current = { context: [], phone: "", rawPhoneLine: "" };
+      current.context.push(line);
+      continue;
     }
-    context = [];
+
+    current = current ?? { context: [], phone: "", rawPhoneLine: "" };
+    current.context.push(line);
   }
 
+  closeCurrent();
   return candidates;
 }
