@@ -1,14 +1,18 @@
 /**
  * Парсинг распознанного текста страницы блокнота в кандидатов заявок.
  *
+ * Блокнот обычно заполняется колонками: город, адрес, что случилось, телефон —
+ * каждый на своей строке. Поэтому кандидат собирается из ГРУППЫ строк:
+ * всё, что встретилось между двумя строками с телефонами, относится к заявке
+ * с ближайшим (следующим за ними) телефоном.
+ *
  * Правила:
- * - строка становится кандидатом, только если в ней найден телефон
- *   (так отсекаются записи блокнота без телефона — например, цены);
- * - имя — слова перед телефоном;
- * - адрес — фрагмент от первого адресного слова (ул., г., дом и т.п.);
- * - услуга — по ключевым словам;
- * - остаток строки — комментарий;
- * - даты (дд.мм.гг) из полей вырезаются.
+ * - строка с телефоном начинает кандидата (телефон — главное поле);
+ * - строки до телефона (город/адрес/комментарий) прикрепляются к кандидату;
+ * - строки-«города» (только буквы) и адреса (ул., кв., дом и т.п.) — в адрес;
+ * - остаток — комментарий; имя заполняется на экране проверки вручную;
+ * - даты и цены из полей вырезаются;
+ * - дубли телефонов убираются.
  */
 
 export interface LeadCandidate {
@@ -17,23 +21,38 @@ export interface LeadCandidate {
   address: string;
   service: string | null;
   comment: string;
-  /** Исходная строка как распознана — для сверки на экране проверки. */
+  /** Исходная строка с телефоном — для сверки на экране проверки. */
   raw: string;
 }
 
 const DATE_RE = /\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/g;
 const PRICE_RE = /\b\d{2,4}\s*(?:руб|р\.?|₽)\b/gi;
 
-/** Телефон: +7/8 и 10 цифр, допускаем разделители и пропуски OCR. */
+/**
+ * Телефон: +7/8 и 10 цифр, допускаем разделители и пропуски OCR.
+ * ВАЖНО: разделители могут быть любыми (пробел, -, .), как в «8-905-113.29.62».
+ */
 const PHONE_RE =
-  /(?:\+?7|8)\s*[(-]?\s*\d{3}\s*[)-]?\s*\d{3}\s*[- ]?\s*\d{2}\s*[- ]?\s*\d{2}/;
+  /(?:\+?7|8)\s*[(-]?\s*\d{3}\s*[)-]?\s*\d{3}[\s\-.]*\d{2}[\s\-.]*\d{2}/;
 
+/**
+ * Адресные слова. НЕ используем \b — в JS он не понимает кириллицу и перед
+ * «ул.»/«кв» граница не сработает. Вместо этого явный кириллический lookbehind.
+ */
 const ADDRESS_RE =
-  /\b(?:ул\.?|улица|г\.|город|дом|д\.|пр\.?|просп\.?|проспект|пер\.?|переулок|шоссе|мкр(?:он)?\.?|микрорайон|пос\.?|поселок|дер\.?|деревня|наб\.?|бул\.?|бульвар)\b/i;
+  /(?<![а-яёa-z0-9])(?:ул\.?|улица|г\.|город|дом|д\.|пр\.?|просп\.?|проспект|пер\.?|переулок|шоссе|мкр(?:он)?\.?|микрорайон|пос\.?|поселок|дер\.?|деревня|наб\.?|бул\.?|бульвар)(?![а-яёa-zA-Z0-9])/i;
+
+const APARTMENT_RE =
+  /(?<![а-яёa-z0-9])(?:кв\.?|квартира|подъезд|этаж)(?![а-яёa-zA-Z0-9])/i;
+
+/** Строка-«город»: только буквы (например: Шекино, Ефремов, Богородецк). */
+function isCityLine(value: string): boolean {
+  return /^[а-яёА-ЯЁ][а-яёА-ЯЁ\- ]*$/.test(value) && value.length >= 2;
+}
 
 const SERVICE_KEYWORDS: { value: string; keys: RegExp }[] = [
-  { value: "repair", keys: /(ремонт|не работ|сломан|не открыв|не закрыв|поврежд)/i },
-  { value: "install", keys: /(установ|подключ|замен(?:а|ить)?|нове?й?\s+домофон)/i },
+  { value: "repair", keys: /(ремонт|не работ|сломан|сломал|замыкан|не открыв|не закрыв|поврежд|не звенит|не отвеча)/i },
+  { value: "install", keys: /(установ|подключ|замен(?:а|ить)?|нове?й?\s+домофон|трубк|модул)/i },
   { value: "maintenance", keys: /(обслуж|профилакт|провер|тех(?:нич)?\.?\s+осмотр)/i },
   { value: "consult", keys: /(консульт|вопрос|уточн|сколько стоит|цена)/i },
 ];
@@ -71,67 +90,71 @@ function detectService(text: string): string | null {
   return null;
 }
 
+/**
+ * Собирает кандидата из контекста: строк до телефона + остаток строки с телефоном.
+ * city — первая строка-«город»; адрес — строки с адресными словами/кв;
+ * остальное — комментарий. Имя оставляем пустым: его заполняют на экране проверки.
+ */
+function buildCandidate(
+  context: string[],
+  phone: string,
+  raw: string,
+): LeadCandidate {
+  let city = "";
+  const addressParts: string[] = [];
+  const rest: string[] = [];
+
+  for (const line of context) {
+    // Обрывки телефонных номеров («8 5») и прочую цифровую кашу пропускаем
+    if (/^[\d\s\-().,+]+$/.test(line)) continue;
+    if (!city && isCityLine(line)) {
+      city = line;
+    } else if (ADDRESS_RE.test(line) || APARTMENT_RE.test(line)) {
+      addressParts.push(line);
+    } else {
+      rest.push(line);
+    }
+  }
+
+  let address = clean(addressParts.join(", "));
+  if (city) address = address ? `${city}, ${address}` : city;
+
+  const comment = clean(rest.join(" "));
+  const service = detectService(clean([...context, raw].join(" ")));
+
+  return { name: "", phone, address, service, comment, raw };
+}
+
 export function parseCandidates(lines: string[]): LeadCandidate[] {
   const seen = new Set<string>();
   const candidates: LeadCandidate[] = [];
+  // Строки, встретившиеся после прошлого телефона — контекст следующего кандидата
+  let context: string[] = [];
 
   for (const rawLine of lines) {
     const line = clean(rawLine);
-    if (line.length < 4) continue;
+    if (line.length < 2) continue;
 
     const phoneMatch = line.match(PHONE_RE);
-    if (!phoneMatch) continue;
 
-    let rest = stripJunk(line);
-    if (rest.length < 4) continue;
-
-    const phone = normalizePhone(phoneMatch[0]);
-    if (seen.has(phone)) continue;
-    seen.add(phone);
-
-    // Фрагменты до открывающей скобки телефона и после неё
-    const phoneStart = line.indexOf(phoneMatch[0]);
-    const before = clean(line.slice(0, phoneStart));
-    const afterRaw = line.slice(phoneStart + phoneMatch[0].length);
-
-    // Адрес ищем в части после телефона (и иногда до неё)
-    let address = "";
-    let comment = "";
-    const addrIdxAfter = afterRaw.search(ADDRESS_RE);
-    const addrIdxBefore = before.search(ADDRESS_RE);
-    if (addrIdxAfter !== -1) {
-      address = clean(afterRaw.slice(addrIdxAfter));
-      comment = clean(afterRaw.slice(0, addrIdxAfter));
-    } else if (addrIdxBefore !== -1) {
-      address = clean(before.slice(addrIdxBefore));
-      comment = clean(afterRaw);
-    } else {
-      comment = clean(afterRaw);
+    if (!phoneMatch) {
+      context.push(line);
+      continue;
     }
 
-    // Комментарий/адрес чистим от дат и цен
-    address = stripJunk(address);
-    comment = stripJunk(comment);
+    const phone = normalizePhone(phoneMatch[0]);
+    if (!seen.has(phone)) {
+      seen.add(phone);
 
-    // Имя: всё до телефона минус адресные слова и мусор
-    let name = clean(before);
-    if (addrIdxBefore !== -1) name = clean(before.slice(0, addrIdxBefore));
-    name = stripJunk(name);
-    // Выкидываем приветствия/служебное
-    name = name.replace(/^(?:здравствуйте|добрый|заявка|клиент|телик)\b/gi, "").trim();
+      const beforeText = clean(line.slice(0, phoneMatch.index));
+      const afterText = stripJunk(line.slice(phoneMatch.index! + phoneMatch[0].length));
+      const ctx = [...context];
+      if (beforeText) ctx.push(beforeText);
+      if (afterText) ctx.push(afterText);
 
-    const service = detectService(line) ?? detectService(rest);
-
-    if (!name && !address) continue;
-
-    candidates.push({
-      name,
-      phone,
-      address,
-      service,
-      comment,
-      raw: rawLine,
-    });
+      candidates.push(buildCandidate(ctx, phone, rawLine));
+    }
+    context = [];
   }
 
   return candidates;
