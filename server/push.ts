@@ -49,13 +49,48 @@ export async function notifyNewLead(lead: Lead): Promise<void> {
           title,
           body,
           sound: "default",
+          // Android 8+: канал «default» создаётся при регистрации токена,
+          // иначе система может молча выбросить уведомление.
+          channelId: "default",
+          priority: "high",
           data: { leadId: lead.id, screen: "leads" },
         }),
       });
-      if (!res.ok) {
-        console.error(`Expo Push API ответил ${res.status}: ${await res.text()}`);
+
+      // ВАЖНО: Expo отвечает 200 даже когда токен отклонён — детальная причина
+      // лежит в теле ответа (tickets). Читаем её и логируем по каждому токену,
+      // чтобы видеть, почему уведомление не доставлено.
+      const text = await res.text();
+      let tickets: {
+        status?: string;
+        message?: string;
+        details?: { error?: string };
+        id?: string;
+      }[] = [];
+      try {
+        const parsed = JSON.parse(text) as { data?: typeof tickets };
+        tickets = parsed.data ?? [];
+      } catch {
+        // не JSON — залогируем сырой ответ ниже
+      }
+
+      let okCount = 0;
+      for (const ticket of tickets) {
+        if (ticket.status === "ok") {
+          okCount++;
+          continue;
+        }
+        console.error(
+          `Push отклонён: ${ticket.message ?? "ошибка"}${ticket.details?.error ? ` (${ticket.details.error})` : ""}`,
+        );
+      }
+
+      if (tickets.length > 0) {
+        console.log(
+          `Push: HTTP ${res.status}, принято ${okCount}/${tickets.length}`,
+        );
       } else {
-        console.log(`Push отправлен на ${batch.length} устройств`);
+        console.error(`Expo Push API ответил ${res.status}: ${text.slice(0, 300)}`);
       }
     } catch (err) {
       console.error("Не удалось отправить push:", err);
