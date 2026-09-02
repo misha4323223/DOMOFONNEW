@@ -1,6 +1,6 @@
 import type { Express, NextFunction, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { randomBytes } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { insertLeadSchema, type Lead } from "@shared/schema";
 import { SERVICE_LABELS } from "@shared/services";
@@ -19,8 +19,32 @@ const ADMIN_PASSWORD =
 const ADMIN_COOKIE = "admin_token";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 дней
 
-// Токены сессий админа: token -> expiresAt (в памяти, подходит для одного контейнера)
-const adminTokens = new Map<string, number>();
+/**
+ * Stateless-токены сессий: подпись HMAC(SHA-256) от пароля + срок жизни.
+ * Serverless Containers крутит НЕСКОЛЬКО инстансов — хранить сессии в памяти
+ * нельзя (запросы из одного браузера попадают на разные инстансы и получают 401).
+ * Токен вида: "<expiresAt>.<nonce>.<hmac>" — проверяется на любом инстансе.
+ */
+function signSession(payload: string): string {
+  return createHmac("sha256", ADMIN_PASSWORD).update(payload).digest("hex");
+}
+
+function issueToken(): string {
+  const payload = `${Date.now() + SESSION_TTL_MS}.${randomBytes(24).toString("hex")}`;
+  return `${payload}.${signSession(payload)}`;
+}
+
+function verifyToken(token: string): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  const [expiresAt, nonce, signature] = parts;
+  if (!/^\d+$/.test(expiresAt) || !/^[0-9a-f]+$/.test(nonce)) return false;
+  const expected = signSession(`${expiresAt}.${nonce}`);
+  const a = Buffer.from(signature, "hex");
+  const b = Buffer.from(expected, "hex");
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+  return Number(expiresAt) > Date.now();
+}
 
 function getCookie(req: Request, name: string): string | undefined {
   const header = req.headers.cookie;
@@ -54,13 +78,7 @@ function getSessionToken(req: Request): string | undefined {
 function isAuthed(req: Request): boolean {
   const token = getSessionToken(req);
   if (!token) return false;
-  const expiresAt = adminTokens.get(token);
-  if (!expiresAt) return false;
-  if (expiresAt < Date.now()) {
-    adminTokens.delete(token);
-    return false;
-  }
-  return true;
+  return verifyToken(token);
 }
 
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
@@ -160,8 +178,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (password !== ADMIN_PASSWORD) {
       return res.status(401).json({ message: "Неверный пароль" });
     }
-    const token = randomBytes(32).toString("hex");
-    adminTokens.set(token, Date.now() + SESSION_TTL_MS);
+    const token = issueToken();
     res.cookie(ADMIN_COOKIE, token, {
       httpOnly: true,
       sameSite: "lax",
@@ -171,9 +188,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.json({ ok: true, token });
   });
 
-  app.post("/api/admin/logout", (req: Request, res: Response) => {
-    const token = getSessionToken(req);
-    if (token) adminTokens.delete(token);
+  app.post("/api/admin/logout", (_req: Request, res: Response) => {
+    // Токен stateless — отозвать на сервере нельзя, просто стираем cookie.
     res.clearCookie(ADMIN_COOKIE, { path: "/" });
     return res.json({ ok: true });
   });
