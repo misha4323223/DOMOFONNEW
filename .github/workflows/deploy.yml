@@ -3,6 +3,9 @@ name: Build & push image to Yandex Cloud
 on:
   push:
     branches: [main]
+  # Ручной редеплой одной кнопкой (Actions → Run workflow):
+  # применяет актуальные секреты без нового коммита.
+  workflow_dispatch:
 
 jobs:
   build:
