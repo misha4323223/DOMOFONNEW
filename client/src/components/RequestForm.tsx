@@ -1,10 +1,12 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
+import { Link } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -34,6 +36,11 @@ const requestSchema = z.object({
   service: z.string().min(1, "Выберите тип заявки"),
   address: z.string().min(5, "Укажите адрес: город, улица, дом, квартира"),
   comment: z.string().optional(),
+  consent: z
+    .boolean()
+    .refine((v) => v === true, {
+      message: "Необходимо согласие на обработку персональных данных",
+    }),
 });
 
 type RequestValues = z.infer<typeof requestSchema>;
@@ -47,17 +54,19 @@ export function RequestForm() {
     resolver: zodResolver(requestSchema),
     defaultValues: {
       name: "",
-      phone: "",
+      phone: "+7 ",
       service: "",
       address: "",
       comment: "",
+      consent: false,
     },
   });
 
   const onSubmit = async (values: RequestValues) => {
     setIsSubmitting(true);
     try {
-      await apiRequest("POST", "/api/leads", values);
+      const { consent: _consent, ...payload } = values;
+      await apiRequest("POST", "/api/leads", payload);
       setSubmitted(true);
       toast({
         title: "Заявка отправлена!",
@@ -138,6 +147,15 @@ export function RequestForm() {
                                 autoComplete="tel"
                                 inputMode="tel"
                                 {...field}
+                                onChange={(e) => {
+                                  let v = e.target.value;
+                                  if (!v.startsWith("+7")) {
+                                    v =
+                                      "+7 " +
+                                      v.replace(/\D/g, "").replace(/^8/, "").replace(/^7/, "");
+                                  }
+                                  field.onChange(v);
+                                }}
                               />
                             </div>
                           </FormControl>
@@ -205,6 +223,34 @@ export function RequestForm() {
                           />
                         </FormControl>
                         <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name="consent"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-start gap-3 space-y-0 rounded-lg border p-4">
+                        <FormControl>
+                          <Checkbox
+                            checked={field.value}
+                            onCheckedChange={field.onChange}
+                            className="mt-0.5"
+                          />
+                        </FormControl>
+                        <div className="space-y-1 leading-none">
+                          <FormLabel className="text-sm font-normal text-muted-foreground leading-relaxed">
+                            Я согласен на обработку персональных данных и принимаю{" "}
+                            <Link
+                              href="/privacy"
+                              className="font-medium text-primary hover:underline"
+                            >
+                              политику конфиденциальности
+                            </Link>
+                          </FormLabel>
+                          <FormMessage />
+                        </div>
                       </FormItem>
                     )}
                   />

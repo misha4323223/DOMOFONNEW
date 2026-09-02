@@ -1,4 +1,5 @@
 import { Sparkles } from "lucide-react";
+import { Link } from "wouter";
 
 export function Footer() {
   const currentYear = new Date().getFullYear();
@@ -75,6 +76,18 @@ export function Footer() {
                 MP Web Studio
               </a>
             </p>
+          </div>
+          <div className="mt-4 pt-4 border-t flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-muted-foreground">
+            <p data-testid="text-footer-requisites">
+              ИП Бухтеев Сергей Валерьевич · ИНН 711610551800 · ОГРНИП 309715404200227
+            </p>
+            <Link
+              href="/privacy"
+              className="hover:text-primary transition-colors"
+              data-testid="link-footer-privacy"
+            >
+              Политика конфиденциальности
+            </Link>
           </div>
         </div>
       </div>
