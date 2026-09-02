@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Home, Inbox, Loader2, Lock, LogOut, RefreshCw } from "lucide-react";
-import type { Lead } from "@shared/schema";
+import type { Lead, LeadStatus } from "@shared/schema";
 
 const SERVICE_LABELS: Record<string, string> = {
   install: "Установка домофона",
@@ -28,6 +28,45 @@ const SERVICE_LABELS: Record<string, string> = {
   maintenance: "Обслуживание",
   consult: "Консультация",
 };
+
+const STATUS_OPTIONS: { value: LeadStatus; label: string }[] = [
+  { value: "new", label: "Новая" },
+  { value: "urgent", label: "Срочно" },
+  { value: "done", label: "Выполнена" },
+];
+
+function StatusChips({
+  lead,
+  onPatch,
+}: {
+  lead: Lead;
+  onPatch: (lead: Lead, status: LeadStatus) => void;
+}) {
+  const current: LeadStatus = lead.status ?? "new";
+  const base =
+    "rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-colors";
+  const inactive = "text-muted-foreground border-border/70 hover:bg-muted";
+  const active: Record<LeadStatus, string> = {
+    new: "text-foreground border-border bg-muted-foreground/10",
+    urgent: "text-amber-600 dark:text-amber-400 border-amber-500/50 bg-amber-500/15",
+    done: "text-emerald-600 dark:text-emerald-400 border-emerald-500/50 bg-emerald-500/15",
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {STATUS_OPTIONS.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          onClick={() => current !== opt.value && onPatch(lead, opt.value)}
+          className={`${base} ${current === opt.value ? active[opt.value] : inactive}`}
+          title={`Отметить: ${opt.label}`}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -127,6 +166,18 @@ function LeadsTable() {
     }
   };
 
+  const setStatus = async (lead: Lead, status: LeadStatus) => {
+    try {
+      await apiRequest("PATCH", `/api/leads/${lead.id}`, { status });
+      setLeads((prev) =>
+        prev ? prev.map((l) => (l.id === lead.id ? { ...l, status } : l)) : prev,
+      );
+      setError("");
+    } catch {
+      setError("Не удалось обновить статус заявки");
+    }
+  };
+
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
@@ -186,6 +237,7 @@ function LeadsTable() {
                           {SERVICE_LABELS[lead.service] ?? lead.service}
                         </Badge>
                       </div>
+                      <StatusChips lead={lead} onPatch={setStatus} />
                       <a href={`tel:${lead.phone}`} className="text-primary hover:underline block">
                         {lead.phone}
                       </a>
@@ -207,6 +259,7 @@ function LeadsTable() {
                         <TableHead>Имя</TableHead>
                         <TableHead>Телефон</TableHead>
                         <TableHead>Услуга</TableHead>
+                        <TableHead>Статус</TableHead>
                         <TableHead>Адрес</TableHead>
                         <TableHead>Комментарий</TableHead>
                       </TableRow>
@@ -230,6 +283,9 @@ function LeadsTable() {
                             <Badge variant="secondary">
                               {SERVICE_LABELS[lead.service] ?? lead.service}
                             </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <StatusChips lead={lead} onPatch={setStatus} />
                           </TableCell>
                           <TableCell className="max-w-[220px] truncate" title={lead.address}>
                             {lead.address}

@@ -7,10 +7,17 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "plugins": [
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Разрешите доступ к камере, чтобы сфотографировать блокнот с заявками"
+        }
+      ]
     ],
     "android": {
       "package": "ru.obzor71.admin",
+      "googleServicesFile": "./google-services.json",
       "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#0a0a0a",

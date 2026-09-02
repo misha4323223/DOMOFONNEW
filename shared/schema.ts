@@ -24,15 +24,22 @@ export const leads = pgTable("leads", {
   createdAt: text("created_at").notNull().default(sql`now()`),
 });
 
-export const insertLeadSchema = createInsertSchema(leads).omit({
-  id: true,
-  createdAt: true,
-}).extend({
-  comment: z.string().nullish(),
-});
+export const LEAD_STATUSES = ["new", "urgent", "done"] as const;
+export type LeadStatus = (typeof LEAD_STATUSES)[number];
+
+export const insertLeadSchema = createInsertSchema(leads)
+  .omit({
+    id: true,
+    createdAt: true,
+  })
+  .extend({
+    comment: z.string().nullish(),
+    // Статус заявки: новая / срочно / выполнена
+    status: z.enum(LEAD_STATUSES).default("new"),
+  });
 
 export type InsertLead = z.infer<typeof insertLeadSchema>;
-export type Lead = typeof leads.$inferSelect;
+export type Lead = typeof leads.$inferSelect & { status: LeadStatus };
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;

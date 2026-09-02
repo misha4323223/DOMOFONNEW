@@ -1,5 +1,7 @@
 export const API_BASE = "https://www.obzor71.ru";
 
+export type LeadStatus = "new" | "urgent" | "done";
+
 export interface Lead {
   id: string;
   name: string;
@@ -7,10 +9,31 @@ export interface Lead {
   service: string;
   address: string;
   comment: string | null;
+  status: LeadStatus;
   createdAt: string;
 }
 
-export type LeadInput = Omit<Lead, "id" | "createdAt">;
+export interface LeadInput {
+  name: string;
+  phone: string;
+  service: string;
+  address: string;
+  comment: string | null;
+}
+
+export type LeadPatch = Partial<LeadInput> & { status?: LeadStatus };
+
+export const LEAD_STATUSES: { value: LeadStatus; label: string }[] = [
+  { value: "new", label: "Новая" },
+  { value: "urgent", label: "Срочно" },
+  { value: "done", label: "Выполнена" },
+];
+
+export function statusLabel(value: LeadStatus | undefined): string {
+  return (
+    LEAD_STATUSES.find((s) => s.value === (value ?? "new"))?.label ?? "Новая"
+  );
+}
 
 export const SERVICES: { value: string; label: string }[] = [
   { value: "install", label: "Установка домофона" },
@@ -68,7 +91,7 @@ export const api = {
   createLead: (token: string, lead: LeadInput) =>
     request("/api/leads/admin", { method: "POST", body: lead, token }),
 
-  updateLead: (token: string, id: string, patch: Partial<LeadInput>) =>
+  updateLead: (token: string, id: string, patch: LeadPatch) =>
     request(`/api/leads/${id}`, { method: "PATCH", body: patch, token }),
 
   deleteLead: (token: string, id: string) =>
@@ -80,4 +103,26 @@ export const api = {
       body: { token: pushToken },
       token,
     }),
+
+  scan: (token: string, imageBase64: string, mimeType: "JPEG" | "PNG") =>
+    request("/api/admin/scan", {
+      method: "POST",
+      body: { image: imageBase64, mimeType },
+      token,
+    }),
 };
+
+export interface LeadCandidate {
+  name: string;
+  phone: string;
+  address: string;
+  service: string | null;
+  comment: string;
+  raw: string;
+}
+
+export interface ScanResult {
+  fullText: string;
+  lines: string[];
+  candidates: LeadCandidate[];
+}

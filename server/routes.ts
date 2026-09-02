@@ -6,6 +6,8 @@ import { insertLeadSchema, type Lead } from "@shared/schema";
 import { SERVICE_LABELS } from "@shared/services";
 import { notifyNewLead } from "./push";
 import { saveDeviceToken, removeDeviceToken } from "./ydb";
+import { recognizeHandwritten } from "./vision";
+import { parseCandidates } from "./parse";
 
 // --- Админка: простая авторизация по паролю ---
 // Пароль задаётся переменной окружения ADMIN_PASSWORD.
@@ -180,6 +182,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.json({ authed: isAuthed(req) });
   });
 
+  // Распознавание фотографии блокнота с заявками (Yandex Vision OCR, рукописный текст)
+  app.post("/api/admin/scan", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const image = typeof req.body?.image === "string" ? req.body.image : "";
+    const mimeType =
+      req.body?.mimeType === "PNG" ? ("PNG" as const) : ("JPEG" as const);
+    if (!image) {
+      return res.status(400).json({ message: "Нет изображения" });
+    }
+    // Ограничение: до ~8 МБ в base64 (Vision принимает до 10 МБ файла)
+    if (image.length > 11_000_000) {
+      return res.status(400).json({ message: "Изображение слишком большое" });
+    }
+    try {
+      const { fullText, lines } = await recognizeHandwritten(image, mimeType);
+      const candidates = parseCandidates(lines);
+      return res.json({ fullText, lines, candidates });
+    } catch (err) {
+      console.error("Vision OCR error:", err);
+      return res.status(502).json({
+        message: "Не удалось распознать текст (Yandex Vision)",
+      });
+    }
+  }));
+
   // Регистрация push-токена мобильного приложения (Expo)
   app.post("/api/admin/push-token", requireAdmin, (req: Request, res: Response) => {
     const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
@@ -249,7 +275,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     }
 
-    const lead = await storage.createLead(parsed.data);
+    // Заявки с публичной формы всегда «новые» — статус управляется только админом
+    const lead = await storage.createLead({ ...parsed.data, status: "new" });
 
     console.log("Новая заявка получена:", JSON.stringify(lead, null, 2));
 

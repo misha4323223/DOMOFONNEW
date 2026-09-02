@@ -10,7 +10,15 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { api, SERVICES, type Lead, type LeadInput } from "../api";
+import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  api,
+  SERVICES,
+  LEAD_STATUSES,
+  type Lead,
+  type LeadInput,
+  type LeadStatus,
+} from "../api";
 import { colors } from "../theme";
 
 interface Props {
@@ -26,6 +34,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
   const [service, setService] = useState(lead?.service ?? "install");
   const [address, setAddress] = useState(lead?.address ?? "");
   const [comment, setComment] = useState(lead?.comment ?? "");
+  const [status, setStatus] = useState<LeadStatus>(lead?.status ?? "new");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -45,7 +54,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
     };
     try {
       if (lead) {
-        await api.updateLead(token, lead.id, body);
+        await api.updateLead(token, lead.id, { ...body, status });
       } else {
         await api.createLead(token, body);
       }
@@ -58,24 +67,25 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <View style={styles.header}>
-        <Pressable onPress={onBack} hitSlop={12}>
-          <Text style={styles.back}>← Назад</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>
-          {lead ? "Редактировать заявку" : "Новая заявка"}
-        </Text>
-        <View style={{ width: 60 }} />
-      </View>
-
-      <ScrollView
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
+    <SafeAreaView style={styles.root}>
+      <KeyboardAvoidingView
+        style={styles.kav}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
+        <View style={styles.header}>
+          <Pressable onPress={onBack} hitSlop={12}>
+            <Text style={styles.back}>← Назад</Text>
+          </Pressable>
+          <Text style={styles.headerTitle}>
+            {lead ? "Редактировать заявку" : "Новая заявка"}
+          </Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+        >
         <Text style={styles.label}>Имя</Text>
         <TextInput
           style={styles.input}
@@ -137,6 +147,36 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           multiline
         />
 
+        {lead ? (
+          <>
+            <Text style={styles.label}>Статус</Text>
+            <View style={styles.services}>
+              {LEAD_STATUSES.map((s) => {
+                const active = status === s.value;
+                return (
+                  <Pressable
+                    key={s.value}
+                    style={[
+                      styles.serviceChip,
+                      active && styles.serviceChipActive,
+                    ]}
+                    onPress={() => setStatus(s.value)}
+                  >
+                    <Text
+                      style={[
+                        styles.serviceChipText,
+                        active && styles.serviceChipTextActive,
+                      ]}
+                    >
+                      {s.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </>
+        ) : null}
+
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
         <Pressable
@@ -153,8 +193,9 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             <Text style={styles.buttonText}>Сохранить</Text>
           )}
         </Pressable>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -162,6 +203,9 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  kav: {
+    flex: 1,
   },
   header: {
     flexDirection: "row",

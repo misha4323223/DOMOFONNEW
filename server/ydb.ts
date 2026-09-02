@@ -11,7 +11,7 @@ const TABLE_NAME = "leads";
 
 let tableReady: Promise<void> | undefined;
 
-async function getIamToken(): Promise<string> {
+export async function getIamToken(): Promise<string> {
   const explicit = process.env.YC_IAM_TOKEN;
   if (explicit) return explicit;
 
@@ -61,6 +61,7 @@ export function toDynamoItem(lead: Lead): Record<string, unknown> {
     phone: { S: lead.phone },
     service: { S: lead.service },
     address: { S: lead.address },
+    status: { S: lead.status ?? "new" },
     createdAt: { S: lead.createdAt },
   };
   if (lead.comment) {
@@ -72,6 +73,7 @@ export function toDynamoItem(lead: Lead): Record<string, unknown> {
 export function fromDynamoItem(
   item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
 ): Lead {
+  const status = item.status?.S;
   return {
     id: item.id?.S ?? "",
     name: item.name?.S ?? "",
@@ -79,6 +81,8 @@ export function fromDynamoItem(
     service: item.service?.S ?? "",
     address: item.address?.S ?? "",
     comment: item.comment?.S ?? null,
+    // Старые записи без статуса считаем новыми
+    status: status === "urgent" || status === "done" ? status : "new",
     createdAt: item.createdAt?.S ?? "",
   };
 }
@@ -113,6 +117,7 @@ export async function createYdbLead(input: InsertLead): Promise<Lead> {
     service: input.service,
     address: input.address,
     comment: input.comment ?? null,
+    status: input.status ?? "new",
     createdAt: new Date().toISOString(),
   };
   await docApi("PutItem", { TableName: TABLE_NAME, Item: toDynamoItem(lead) });

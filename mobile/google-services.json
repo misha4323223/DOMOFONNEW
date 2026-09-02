@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "575821856425",
+    "project_id": "domofon-fe157",
+    "storage_bucket": "domofon-fe157.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:575821856425:android:26c17cb07fdb8a7c7e33b8",
+        "android_client_info": {
+          "package_name": "ru.obzor71.admin"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDlPQZPHGuHO3ltDRLN1R-rlTTX21RDo4Y"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

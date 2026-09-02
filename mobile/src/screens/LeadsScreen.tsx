@@ -9,8 +9,16 @@ import {
   Text,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import * as Notifications from "expo-notifications";
-import { api, serviceLabel, type Lead } from "../api";
+import Constants from "expo-constants";
+import {
+  api,
+  serviceLabel,
+  LEAD_STATUSES,
+  type Lead,
+  type LeadStatus,
+} from "../api";
 import { colors } from "../theme";
 
 interface Props {
@@ -18,6 +26,7 @@ interface Props {
   onLogout: () => void;
   onAdd: () => void;
   onEdit: (lead: Lead) => void;
+  onScan: () => void;
 }
 
 function formatDate(iso: string): string {
@@ -43,12 +52,16 @@ async function registerPushToken(token: string) {
     }
     if (status !== "granted") return;
 
+    // Для Android 8+ нужен канал, иначе уведомление не покажется
     await Notifications.setNotificationChannelAsync("default", {
       name: "Новые заявки",
       importance: Notifications.AndroidImportance.HIGH,
     });
 
-    const push = await Notifications.getExpoPushTokenAsync();
+    // projectId обязателен для получения ExpoPushToken (Expo Go и EAS-сборки)
+    const push = await Notifications.getExpoPushTokenAsync({
+      projectId: Constants.easConfig?.projectId,
+    });
     await api.registerPushToken(token, push.data);
   } catch (e) {
     // Уведомления не критичны — молча пропускаем
@@ -56,7 +69,7 @@ async function registerPushToken(token: string) {
   }
 }
 
-export function LeadsScreen({ token, onLogout, onAdd, onEdit }: Props) {
+export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan }: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -94,6 +107,40 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit }: Props) {
     };
   }, [token, load]);
 
+  const changeStatus = async (lead: Lead, next: LeadStatus) => {
+    if (lead.status === next) return;
+    // Оптимистично меняем сразу, при ошибке откатываем
+    setLeads((prev) =>
+      prev.map((l) => (l.id === lead.id ? { ...l, status: next } : l)),
+    );
+    try {
+      await api.updateLead(token, lead.id, { status: next });
+    } catch (e) {
+      setLeads((prev) =>
+        prev.map((l) => (l.id === lead.id ? { ...l, status: lead.status } : l)),
+      );
+      Alert.alert(
+        "Ошибка",
+        e instanceof Error ? e.message : "Не удалось обновить статус",
+      );
+    }
+  };
+
+  const statusChipStyle = (active: boolean, value: LeadStatus) => {
+    const base = styles.statusChip;
+    if (!active) return base;
+    if (value === "urgent") return [base, styles.statusChipUrgent];
+    if (value === "done") return [base, styles.statusChipDone];
+    return [base, styles.statusChipNew];
+  };
+
+  const statusChipTextStyle = (active: boolean, value: LeadStatus) => {
+    if (!active) return styles.statusChipText;
+    if (value === "urgent") return [styles.statusChipText, styles.statusChipTextUrgent];
+    if (value === "done") return [styles.statusChipText, styles.statusChipTextDone];
+    return [styles.statusChipText, styles.statusChipTextNew];
+  };
+
   const confirmDelete = (lead: Lead) => {
     Alert.alert(
       "Удалить заявку?",
@@ -121,7 +168,11 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit }: Props) {
 
   const renderCard = ({ item }: { item: Lead }) => (
     <Pressable
-      style={({ pressed }) => [styles.card, pressed && { opacity: 0.8 }]}
+      style={({ pressed }) => [
+        styles.card,
+        (item.status ?? "new") === "done" && styles.cardDone,
+        pressed && { opacity: 0.8 },
+      ]}
       onPress={() => onEdit(item)}
       onLongPress={() => confirmDelete(item)}
       delayLongPress={500}
@@ -134,8 +185,25 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit }: Props) {
         <Text style={styles.cardLabel}>📞 </Text>
         <Text style={styles.cardPhone}>{item.phone}</Text>
       </View>
-      <View style={styles.chip}>
-        <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
+      <View style={styles.chipRow}>
+        <View style={styles.chip}>
+          <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
+        </View>
+        <View style={styles.statusRow}>
+          {LEAD_STATUSES.map((s) => {
+            const active = (item.status ?? "new") === s.value;
+            return (
+              <Pressable
+                key={s.value}
+                onPress={() => changeStatus(item, s.value)}
+                style={statusChipStyle(active, s.value)}
+                hitSlop={6}
+              >
+                <Text style={statusChipTextStyle(active, s.value)}>{s.label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
       </View>
       <Text style={styles.cardAddress}>📍 {item.address}</Text>
       {item.comment ? (
@@ -148,7 +216,7 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit }: Props) {
   );
 
   return (
-    <View style={styles.root}>
+    <SafeAreaView style={styles.root}>
       <View style={styles.header}>
         <View>
           <Text style={styles.headerTitle}>Заявки</Text>
@@ -157,6 +225,9 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit }: Props) {
           </Text>
         </View>
         <View style={styles.headerActions}>
+          <Pressable onPress={onScan} hitSlop={12} style={styles.scanButton}>
+            <Text style={styles.scanButtonText}>📷 Блокнот</Text>
+          </Pressable>
           <Pressable
             style={({ pressed }) => [
               styles.addButton,
@@ -203,7 +274,7 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit }: Props) {
           }
         />
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -236,6 +307,19 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 14,
+  },
+  scanButton: {
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: colors.inputBg,
+  },
+  scanButtonText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "700",
   },
   addButton: {
     backgroundColor: colors.primary,
@@ -294,6 +378,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "700",
   },
+  chipRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap",
+  },
   chip: {
     alignSelf: "flex-start",
     backgroundColor: colors.inputBg,
@@ -307,6 +397,50 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 12,
     fontWeight: "600",
+  },
+  cardDone: {
+    opacity: 0.6,
+  },
+  statusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flex: 1,
+    flexWrap: "wrap",
+  },
+  statusChip: {
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    backgroundColor: colors.inputBg,
+  },
+  statusChipNew: {
+    borderColor: colors.textMuted,
+    backgroundColor: colors.textMuted,
+  },
+  statusChipUrgent: {
+    borderColor: "#f59e0b",
+    backgroundColor: "rgba(245,158,11,0.18)",
+  },
+  statusChipDone: {
+    borderColor: "#22c55e",
+    backgroundColor: "rgba(34,197,94,0.18)",
+  },
+  statusChipText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  statusChipTextNew: {
+    color: "#0a0a0a",
+  },
+  statusChipTextUrgent: {
+    color: "#fbbf24",
+  },
+  statusChipTextDone: {
+    color: "#4ade80",
   },
   cardAddress: {
     color: colors.text,

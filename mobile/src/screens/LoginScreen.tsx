@@ -9,6 +9,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { api } from "../api";
 import { colors } from "../theme";
 
@@ -36,45 +37,47 @@ export function LoginScreen({ onLogin }: Props) {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <View style={styles.card}>
-        <Text style={styles.title}>Домофонная служба</Text>
-        <Text style={styles.subtitle}>Админка</Text>
+    <SafeAreaView style={styles.root}>
+      <KeyboardAvoidingView
+        style={styles.kav}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <View style={styles.card}>
+          <Text style={styles.title}>Домофонная служба</Text>
+          <Text style={styles.subtitle}>Админка</Text>
 
-        <TextInput
-          style={styles.input}
-          placeholder="Пароль"
-          placeholderTextColor={colors.textMuted}
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-          value={password}
-          onChangeText={setPassword}
-          onSubmitEditing={submit}
-          returnKeyType="go"
-        />
+          <TextInput
+            style={styles.input}
+            placeholder="Пароль"
+            placeholderTextColor={colors.textMuted}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            value={password}
+            onChangeText={setPassword}
+            onSubmitEditing={submit}
+            returnKeyType="go"
+          />
 
-        {error ? <Text style={styles.error}>{error}</Text> : null}
+          {error ? <Text style={styles.error}>{error}</Text> : null}
 
-        <Pressable
-          style={({ pressed }) => [
-            styles.button,
-            pressed && { opacity: 0.85 },
-          ]}
-          onPress={submit}
-          disabled={busy}
-        >
-          {busy ? (
-            <ActivityIndicator color={colors.primaryForeground} />
-          ) : (
-            <Text style={styles.buttonText}>Войти</Text>
-          )}
-        </Pressable>
-      </View>
-    </KeyboardAvoidingView>
+          <Pressable
+            style={({ pressed }) => [
+              styles.button,
+              pressed && { opacity: 0.85 },
+            ]}
+            onPress={submit}
+            disabled={busy}
+          >
+            {busy ? (
+              <ActivityIndicator color={colors.primaryForeground} />
+            ) : (
+              <Text style={styles.buttonText}>Войти</Text>
+            )}
+          </Pressable>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -82,6 +85,10 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  kav: {
+    flex: 1,
+    width: "100%",
     alignItems: "center",
     justifyContent: "center",
     padding: 24,

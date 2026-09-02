@@ -36,6 +36,7 @@ export class MemStorage implements IStorage {
     const lead: Lead = {
       ...insertLead,
       comment: insertLead.comment ?? null,
+      status: insertLead.status ?? "new",
       id: randomUUID(),
       createdAt: new Date().toISOString(),
     };

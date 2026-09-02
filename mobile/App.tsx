@@ -1,12 +1,15 @@
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { LeadsScreen } from "./src/screens/LeadsScreen";
 import { LeadFormScreen } from "./src/screens/LeadFormScreen";
-import { api, type Lead } from "./src/api";
+import { ScanScreen } from "./src/screens/ScanScreen";
+import { ReviewScreen } from "./src/screens/ReviewScreen";
+import { api, type Lead, type LeadCandidate } from "./src/api";
 import { colors } from "./src/theme";
 
 const TOKEN_KEY = "admin_token";
@@ -23,7 +26,9 @@ Notifications.setNotificationHandler({
 
 type Screen =
   | { name: "leads" }
-  | { name: "form"; lead: Lead | null };
+  | { name: "form"; lead: Lead | null }
+  | { name: "scan" }
+  | { name: "review"; candidates: LeadCandidate[]; fullText: string };
 
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -54,26 +59,23 @@ export default function App() {
     setScreen({ name: "leads" });
   };
 
+  let content: ReactNode;
   if (loading) {
-    return (
+    content = (
       <View style={styles.center}>
         <StatusBar style="light" />
         <ActivityIndicator size="large" color={colors.primary} />
       </View>
     );
-  }
-
-  if (!token) {
-    return (
+  } else if (!token) {
+    content = (
       <View style={styles.root}>
         <StatusBar style="light" />
         <LoginScreen onLogin={handleLogin} />
       </View>
     );
-  }
-
-  if (screen.name === "form") {
-    return (
+  } else if (screen.name === "form") {
+    content = (
       <View style={styles.root}>
         <StatusBar style="light" />
         <LeadFormScreen
@@ -87,20 +89,52 @@ export default function App() {
         />
       </View>
     );
+  } else if (screen.name === "scan") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <ScanScreen
+          token={token}
+          onResult={(candidates, fullText) =>
+            setScreen({ name: "review", candidates, fullText })
+          }
+          onBack={() => setScreen({ name: "leads" })}
+        />
+      </View>
+    );
+  } else if (screen.name === "review") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <ReviewScreen
+          token={token}
+          candidates={screen.candidates}
+          fullText={screen.fullText}
+          onDone={() => {
+            setReloadKey((k) => k + 1);
+            setScreen({ name: "leads" });
+          }}
+          onBack={() => setScreen({ name: "leads" })}
+        />
+      </View>
+    );
+  } else {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <LeadsScreen
+          key={reloadKey}
+          token={token}
+          onLogout={handleLogout}
+          onAdd={() => setScreen({ name: "form", lead: null })}
+          onEdit={(lead) => setScreen({ name: "form", lead })}
+          onScan={() => setScreen({ name: "scan" })}
+        />
+      </View>
+    );
   }
 
-  return (
-    <View style={styles.root}>
-      <StatusBar style="light" />
-      <LeadsScreen
-        key={reloadKey}
-        token={token}
-        onLogout={handleLogout}
-        onAdd={() => setScreen({ name: "form", lead: null })}
-        onEdit={(lead) => setScreen({ name: "form", lead })}
-      />
-    </View>
-  );
+  return <SafeAreaProvider>{content}</SafeAreaProvider>;
 }
 
 const styles = StyleSheet.create({
