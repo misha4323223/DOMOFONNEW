@@ -16,7 +16,7 @@ export function Benefits() {
     {
       icon: Award,
       title: "Работаем официально",
-      description: "Заключаем договор и предоставляем чеки."
+      description: "Заключаем договор на выполнение работ."
     }
   ];
 
