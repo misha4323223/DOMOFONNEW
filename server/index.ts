@@ -39,6 +39,18 @@ app.use((req, res, next) => {
   next();
 });
 
+// Главный адрес сайта — https://obzor71.ru (без www). Страницы, открытые по
+// www.obzor71.ru, отдаём постоянным редиректом 301 на основной домен, чтобы
+// поисковики и посетители всегда видели один адрес. API (/api/*) не трогаем:
+// на него ходит установленное мобильное приложение, которому адрес менять нельзя.
+app.use((req, res, next) => {
+  const host = (req.headers.host ?? "").toLowerCase();
+  if (host === "www.obzor71.ru" && !req.path.startsWith("/api")) {
+    return res.redirect(301, `https://obzor71.ru${req.originalUrl}`);
+  }
+  next();
+});
+
 (async () => {
   const server = await registerRoutes(app);
 

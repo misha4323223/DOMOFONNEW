@@ -7,7 +7,7 @@
 
 ## Проект
 - Домофонная служба (ИП Бухтеев): лендинг + админка заявок на сайте, мобильное Android-приложение для админа.
-- Прод-домен: `www.obzor71.ru`. Бэкенд — Express в Yandex Cloud Serverless Containers, база — YandexDB (папка `server/`, деплой по пушу в `main` через GitHub Actions).
+- Прод-домен: `obzor71.ru` (без www — главный). `www.obzor71.ru` отдаёт 301 на него для страниц; API `/api/*` на www остаётся доступным — на него ходит установленное мобильное приложение. Бэкенд — Express в Yandex Cloud Serverless Containers, база — YandexDB (папка `server/`, деплой по пушу в `main` через GitHub Actions).
 - Код клиента сайта — `client/`, мобильное приложение (Expo SDK 57) — `mobile/`, общие типы/схемы — `shared/`.
 
 ## Важные нюансы (проверено на проде)

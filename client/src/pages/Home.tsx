@@ -2,6 +2,7 @@ import { Header } from "@/components/Header";
 import { Hero } from "@/components/Hero";
 import { Services } from "@/components/Services";
 import { Benefits } from "@/components/Benefits";
+import { Coverage } from "@/components/Coverage";
 import { RequestForm } from "@/components/RequestForm";
 import { Contact } from "@/components/Contact";
 import { Footer } from "@/components/Footer";
@@ -21,6 +22,7 @@ export default function Home() {
         <Hero onRequestClick={scrollToForm} />
         <Services />
         <Benefits />
+        <Coverage />
         <RequestForm />
         <Contact />
       </main>
