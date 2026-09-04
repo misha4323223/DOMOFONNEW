@@ -16,8 +16,11 @@ const cities = [
 ];
 
 export function Coverage() {
+  // Блок скрыт визуально (sr-only), но остаётся в HTML и доступен поисковикам:
+  // в нём ключевые фразы — ИП Бухтеев, города и зона работы. Если блок снова
+  // нужно показать — уберите класс sr-only из <section>.
   return (
-    <section className="py-20 bg-background border-t border-border/60" id="coverage">
+    <section className="sr-only" id="coverage">
       <div className="max-w-6xl mx-auto px-6">
         <div className="text-center max-w-3xl mx-auto mb-12">
           <h2
