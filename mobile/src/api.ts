@@ -1,4 +1,29 @@
-export const API_BASE = "https://www.obzor71.ru";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { HomeContent } from "./content";
+
+export const API_BASE = "https://obzor71.ru";
+
+const CACHE_KEY = "leads_cache";
+
+/** Сохранить заявки в локальный кеш */
+export async function cacheLeads(leads: Lead[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(leads));
+  } catch {
+    // кеш не критичен — молча пропускаем
+  }
+}
+
+/** Прочитать заявки из локального кеша (или []) */
+export async function getCachedLeads(): Promise<Lead[]> {
+  try {
+    const raw = await AsyncStorage.getItem(CACHE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as Lead[];
+  } catch {
+    return [];
+  }
+}
 
 export type LeadStatus = "new" | "urgent" | "done";
 
@@ -110,6 +135,36 @@ export const api = {
       body: { image: imageBase64, mimeType },
       token,
     }),
+
+  /** Текущий контент главной страницы (публичный эндпоинт). */
+  getContent: () =>
+    request("/api/content") as Promise<{
+      content: HomeContent;
+      updatedAt: string | null;
+    }>,
+
+  /** Сохранить контент главной страницы из редактора. */
+  saveContent: (token: string, content: HomeContent) =>
+    request("/api/admin/content", {
+      method: "PUT",
+      body: { content },
+      token,
+    }) as Promise<{ ok: boolean; content: HomeContent; updatedAt: string }>,
+
+  /** Загрузить своё фото первого экрана (data-url, сжатый jpeg/webp/png). */
+  uploadContentImage: (token: string, key: string, dataUrl: string) =>
+    request("/api/admin/content/image", {
+      method: "PUT",
+      body: { key, dataUrl },
+      token,
+    }) as Promise<{ ok: boolean; url: string }>,
+
+  /** Удалить загруженное фото (вернуть стандартное из сборки). */
+  deleteContentImage: (token: string, key: string) =>
+    request(`/api/admin/content/image/${key}`, {
+      method: "DELETE",
+      token,
+    }) as Promise<{ ok: boolean }>,
 };
 
 export interface LeadCandidate {

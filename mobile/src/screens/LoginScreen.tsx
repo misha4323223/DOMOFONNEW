@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -12,6 +13,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { api } from "../api";
 import { colors } from "../theme";
+import { checkForUpdate, downloadAndRestart } from "../updates";
 
 interface Props {
   onLogin: (token: string) => void;
@@ -21,6 +23,7 @@ export function LoginScreen({ onLogin }: Props) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   const submit = async () => {
     if (!password.trim() || busy) return;
@@ -33,6 +36,33 @@ export function LoginScreen({ onLogin }: Props) {
       setError(e instanceof Error ? e.message : "Не удалось войти");
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Ручная проверка OTA-обновлений (например, если обновление вышло,
+  // пока приложение было открыто)
+  const checkUpdate = async () => {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    try {
+      const status = await checkForUpdate();
+      if (status === "available") {
+        const applied = await downloadAndRestart();
+        if (!applied) {
+          Alert.alert("Обновление", "Не удалось применить обновление");
+        }
+      } else if (status === "none") {
+        Alert.alert("Обновление", "Установлена актуальная версия");
+      } else if (status === "unsupported") {
+        Alert.alert(
+          "Обновление",
+          "Проверка доступна только в собранном приложении",
+        );
+      } else {
+        Alert.alert("Обновление", "Не удалось проверить — проверьте интернет");
+      }
+    } finally {
+      setCheckingUpdate(false);
     }
   };
 
@@ -76,6 +106,14 @@ export function LoginScreen({ onLogin }: Props) {
             )}
           </Pressable>
         </View>
+
+        <Pressable onPress={checkUpdate} hitSlop={10} style={styles.updateLink}>
+          {checkingUpdate ? (
+            <ActivityIndicator size="small" color={colors.textMuted} />
+          ) : (
+            <Text style={styles.updateLinkText}>🔄 Проверить обновление</Text>
+          )}
+        </Pressable>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -92,6 +130,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     padding: 24,
+  },
+  updateLink: {
+    marginTop: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    alignItems: "center",
+  },
+  updateLinkText: {
+    color: colors.textMuted,
+    fontSize: 14,
+    fontWeight: "600",
   },
   card: {
     width: "100%",

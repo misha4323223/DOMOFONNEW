@@ -1,14 +1,16 @@
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useState, type ReactNode } from "react";
-import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ActivityIndicator, AppState, StyleSheet, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
+import { checkForUpdate, downloadAndRestart } from "./src/updates";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { LeadsScreen } from "./src/screens/LeadsScreen";
 import { LeadFormScreen } from "./src/screens/LeadFormScreen";
 import { ScanScreen } from "./src/screens/ScanScreen";
 import { ReviewScreen } from "./src/screens/ReviewScreen";
+import { ContentScreen } from "./src/screens/ContentScreen";
 import { api, type Lead, type LeadCandidate } from "./src/api";
 import { colors } from "./src/theme";
 
@@ -28,7 +30,8 @@ type Screen =
   | { name: "leads" }
   | { name: "form"; lead: Lead | null }
   | { name: "scan" }
-  | { name: "review"; candidates: LeadCandidate[]; fullText: string };
+  | { name: "review"; candidates: LeadCandidate[]; fullText: string }
+  | { name: "content" };
 
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -45,6 +48,34 @@ export default function App() {
         setLoading(false);
       }
     })();
+  }, []);
+
+  // OTA: проверяем наличие новой версии на EAS Update при запуске и при каждом
+  // возврате приложения на передний план. Если она есть — скачиваем и сразу
+  // перезапускаемся на ней. Автопроверка библиотеки выключена в app.json
+  // (updates.checkAutomatically: "NEVER"), чтобы не дублировать запросы.
+  const checkingUpdate = useRef(false);
+  useEffect(() => {
+    const applyUpdateIfAny = async () => {
+      if (checkingUpdate.current) return;
+      checkingUpdate.current = true;
+      try {
+        const status = await checkForUpdate();
+        if (status === "available") {
+          await downloadAndRestart();
+        }
+      } finally {
+        checkingUpdate.current = false;
+      }
+    };
+
+    if (AppState.currentState === "active") {
+      applyUpdateIfAny();
+    }
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") applyUpdateIfAny();
+    });
+    return () => sub.remove();
   }, []);
 
   const handleLogin = async (newToken: string) => {
@@ -102,6 +133,13 @@ export default function App() {
         />
       </View>
     );
+  } else if (screen.name === "content") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <ContentScreen token={token} onBack={() => setScreen({ name: "leads" })} />
+      </View>
+    );
   } else if (screen.name === "review") {
     content = (
       <View style={styles.root}>
@@ -129,6 +167,7 @@ export default function App() {
           onAdd={() => setScreen({ name: "form", lead: null })}
           onEdit={(lead) => setScreen({ name: "form", lead })}
           onScan={() => setScreen({ name: "scan" })}
+          onContent={() => setScreen({ name: "content" })}
         />
       </View>
     );

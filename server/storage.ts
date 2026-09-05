@@ -1,6 +1,15 @@
 import { type User, type InsertUser, type Lead, type InsertLead } from "@shared/schema";
 import { randomUUID } from "crypto";
-import { createYdbLead, listYdbLeads, updateYdbLead, deleteYdbLead } from "./ydb";
+import {
+  createYdbLead,
+  listYdbLeads,
+  updateYdbLead,
+  deleteYdbLead,
+  getYdbSetting,
+  putYdbSetting,
+  deleteYdbSetting,
+  type StoredSetting,
+} from "./ydb";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -10,11 +19,16 @@ export interface IStorage {
   listLeads(): Promise<Lead[]>;
   updateLead(id: string, patch: Partial<InsertLead>): Promise<Lead | undefined>;
   deleteLead(id: string): Promise<boolean>;
+  // Настройки сайта (контент главной страницы и фото) — key/value.
+  getSetting(key: string): Promise<StoredSetting | undefined>;
+  setSetting(key: string, value: string): Promise<void>;
+  removeSetting(key: string): Promise<void>;
 }
 
 export class MemStorage implements IStorage {
   private users = new Map<string, User>();
   private leads = new Map<string, Lead>();
+  private settings = new Map<string, StoredSetting>();
   private useYdb = Boolean(process.env.YDB_DATABASE_PATH);
 
   async getUser(id: string): Promise<User | undefined> {
@@ -63,6 +77,27 @@ export class MemStorage implements IStorage {
   async deleteLead(id: string): Promise<boolean> {
     if (this.useYdb) return deleteYdbLead(id);
     return this.leads.delete(id);
+  }
+
+  async getSetting(key: string): Promise<StoredSetting | undefined> {
+    if (this.useYdb) return getYdbSetting(key);
+    return this.settings.get(key);
+  }
+
+  async setSetting(key: string, value: string): Promise<void> {
+    if (this.useYdb) {
+      await putYdbSetting(key, value);
+      return;
+    }
+    this.settings.set(key, { value, updatedAt: new Date().toISOString() });
+  }
+
+  async removeSetting(key: string): Promise<void> {
+    if (this.useYdb) {
+      await deleteYdbSetting(key);
+      return;
+    }
+    this.settings.delete(key);
   }
 }
 

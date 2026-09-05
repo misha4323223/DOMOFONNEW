@@ -6,12 +6,26 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/01a13674-a633-47ca-ae30-865da95251c1",
+      "checkAutomatically": "NEVER"
+    },
     "plugins": [
       "expo-notifications",
       [
         "expo-camera",
         {
           "cameraPermission": "Разрешите доступ к камере, чтобы сфотографировать блокнот с заявками"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Разрешите доступ к фото, чтобы заменить фото на сайте",
+          "microphonePermission": false
         }
       ]
     ],

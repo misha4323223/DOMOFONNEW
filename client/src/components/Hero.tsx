@@ -1,23 +1,30 @@
 import { Button } from "@/components/ui/button";
+import type { HeroContent } from "@shared/content";
 import heroDesktop from "../../image/hero-desktop.webp";
 import heroMobile from "../../image/hero-mobile.webp";
 
 interface HeroProps {
+  content: HeroContent;
   onRequestClick: () => void;
 }
 
-export function Hero({ onRequestClick }: HeroProps) {
+export function Hero({ content, onRequestClick }: HeroProps) {
   const scrollToServices = () =>
     document.querySelector("#services")?.scrollIntoView({ behavior: "smooth" });
+
+  // Пустая строка = стандартное фото из сборки сайта.
+  // Своё фото, загруженное в админке, приходит путём вида /api/content/image/...
+  const desktopSrc = content.desktopImage || heroDesktop;
+  const mobileSrc = content.mobileImage || heroMobile;
 
   return (
     <section>
       <div className="relative h-[85vh] min-h-[560px] overflow-hidden">
         <picture className="absolute inset-0">
-          <source media="(max-width: 767px)" srcSet={heroMobile} />
+          <source media="(max-width: 767px)" srcSet={mobileSrc} />
           <img
-            src={heroDesktop}
-            alt=""
+            src={desktopSrc}
+            alt={content.altText}
             className="h-full w-full object-cover object-center"
           />
         </picture>
@@ -29,7 +36,7 @@ export function Hero({ onRequestClick }: HeroProps) {
           onClick={onRequestClick}
           data-testid="button-hero-request"
         >
-          Оставить заявку
+          {content.requestButtonText}
         </Button>
         <Button
           variant="outline"
@@ -37,7 +44,7 @@ export function Hero({ onRequestClick }: HeroProps) {
           onClick={scrollToServices}
           data-testid="button-hero-services"
         >
-          Наши услуги
+          {content.servicesButtonText}
         </Button>
       </div>
     </section>

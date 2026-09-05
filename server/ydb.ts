@@ -210,3 +210,72 @@ export async function removeDeviceToken(token: string): Promise<void> {
     Key: { token: { S: token } },
   });
 }
+
+// --- Настройки сайта (контент главной страницы, загруженные фото) ---
+// Простая key-value таблица: в `value` лежит JSON-строка или data-url фото.
+
+const SETTINGS_TABLE = "settings";
+
+let settingsTableReady: Promise<void> | undefined;
+
+async function ensureSettingsTable(): Promise<void> {
+  if (!settingsTableReady) {
+    settingsTableReady = (async () => {
+      try {
+        await docApi("CreateTable", {
+          TableName: SETTINGS_TABLE,
+          AttributeDefinitions: [{ AttributeName: "key", AttributeType: "S" }],
+          KeySchema: [{ AttributeName: "key", KeyType: "HASH" }],
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Таблица уже существует — это нормально
+        if (!message.includes("ResourceInUseException")) {
+          throw error;
+        }
+      }
+    })();
+  }
+  await settingsTableReady;
+}
+
+export interface StoredSetting {
+  value: string;
+  updatedAt: string;
+}
+
+/** Прочитать настройку по ключу (key/value-таблица, документная модель YDB). */
+export async function getYdbSetting(key: string): Promise<StoredSetting | undefined> {
+  await ensureSettingsTable();
+  const result = (await docApi("GetItem", {
+    TableName: SETTINGS_TABLE,
+    Key: { key: { S: key } },
+  })) as
+    | { Item?: Record<string, { S?: string }> }
+    | undefined;
+  const item = result?.Item;
+  if (!item || item.value?.S === undefined) return undefined;
+  return { value: item.value.S, updatedAt: item.updatedAt?.S ?? "" };
+}
+
+/** Сохранить настройку (создаст или перезапишет запись). */
+export async function putYdbSetting(key: string, value: string): Promise<void> {
+  await ensureSettingsTable();
+  await docApi("PutItem", {
+    TableName: SETTINGS_TABLE,
+    Item: {
+      key: { S: key },
+      value: { S: value },
+      updatedAt: { S: new Date().toISOString() },
+    },
+  });
+}
+
+/** Удалить настройку (например, фото героя при возврате к стандартному). */
+export async function deleteYdbSetting(key: string): Promise<void> {
+  await ensureSettingsTable();
+  await docApi("DeleteItem", {
+    TableName: SETTINGS_TABLE,
+    Key: { key: { S: key } },
+  });
+}

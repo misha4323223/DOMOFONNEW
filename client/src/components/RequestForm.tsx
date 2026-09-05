@@ -26,6 +26,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { Loader2, PhoneCall, Send, CheckCircle2 } from "lucide-react";
 import { useState } from "react";
+import type { FormContent } from "@shared/content";
 
 const requestSchema = z.object({
   name: z.string().min(2, "Укажите имя"),
@@ -45,7 +46,7 @@ const requestSchema = z.object({
 
 type RequestValues = z.infer<typeof requestSchema>;
 
-export function RequestForm() {
+export function RequestForm({ content }: { content: FormContent }) {
   const { toast } = useToast();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -69,8 +70,8 @@ export function RequestForm() {
       await apiRequest("POST", "/api/leads", payload);
       setSubmitted(true);
       toast({
-        title: "Заявка отправлена!",
-        description: "Перезвоним в рабочее время: будни с 10:00 до 16:00.",
+        title: content.successToastTitle,
+        description: content.toastDescription,
         variant: "default",
       });
       form.reset();
@@ -93,10 +94,10 @@ export function RequestForm() {
       <div className="max-w-4xl mx-auto px-6 relative">
         <div className="text-center mb-12">
           <h2 className="text-4xl font-bold mb-4" data-testid="text-form-title">
-            Заявка на обслуживание
+            {content.title}
           </h2>
           <p className="text-lg text-muted-foreground max-w-2xl mx-auto" data-testid="text-form-subtitle">
-            Заполните форму — и мы вам перезвоним. Отвечаем в рабочие дни, с 10:00 до 16:00. Заявки, оставленные после 16:00, обработаем на следующий день.
+            {content.subtitle}
           </p>
         </div>
 
@@ -105,9 +106,9 @@ export function RequestForm() {
             {submitted ? (
               <div className="py-16 text-center">
                 <CheckCircle2 className="h-16 w-16 text-primary mx-auto mb-6" />
-                <h3 className="text-2xl font-bold mb-2">Спасибо, заявка принята!</h3>
+                <h3 className="text-2xl font-bold mb-2">{content.successTitle}</h3>
                 <p className="text-muted-foreground">
-                  Мы уже получили её и перезвоним в рабочее время: будни с 10:00 до 16:00.
+                  {content.successDescription}
                 </p>
               </div>
             ) : (
@@ -119,10 +120,10 @@ export function RequestForm() {
                       name="name"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Ваше имя</FormLabel>
+                          <FormLabel>{content.nameLabel}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="Иван"
+                              placeholder={content.namePlaceholder}
                               className="h-12"
                               autoComplete="name"
                               {...field}
@@ -137,12 +138,12 @@ export function RequestForm() {
                       name="phone"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Телефон</FormLabel>
+                          <FormLabel>{content.phoneLabel}</FormLabel>
                           <FormControl>
                             <div className="relative">
                               <PhoneCall className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                               <Input
-                                placeholder="+7 (___) ___-__-__"
+                                placeholder={content.phonePlaceholder}
                                 className="h-12 pl-11"
                                 autoComplete="tel"
                                 inputMode="tel"
@@ -171,17 +172,18 @@ export function RequestForm() {
                       name="service"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Тип заявки</FormLabel>
+                          <FormLabel>{content.serviceLabel}</FormLabel>
                           <FormControl>
                             <Select value={field.value} onValueChange={field.onChange}>
                               <SelectTrigger className="h-12">
-                                <SelectValue placeholder="Выберите услугу" />
+                                <SelectValue placeholder={content.servicePlaceholder} />
                               </SelectTrigger>
                               <SelectContent>
-                                <SelectItem value="install">Установка домофона</SelectItem>
-                                <SelectItem value="repair">Ремонт / не работает</SelectItem>
-                                <SelectItem value="maintenance">Обслуживание</SelectItem>
-                                <SelectItem value="consult">Консультация</SelectItem>
+                                {content.serviceOptions.map((option) => (
+                                  <SelectItem key={option.value} value={option.value}>
+                                    {option.label}
+                                  </SelectItem>
+                                ))}
                               </SelectContent>
                             </Select>
                           </FormControl>
@@ -194,10 +196,10 @@ export function RequestForm() {
                       name="address"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Адрес</FormLabel>
+                          <FormLabel>{content.addressLabel}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="г. Город, ул. Название, д. 1, кв. 1"
+                              placeholder={content.addressPlaceholder}
                               className="h-12"
                               autoComplete="street-address"
                               {...field}
@@ -214,10 +216,10 @@ export function RequestForm() {
                     name="comment"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Комментарий (необязательно)</FormLabel>
+                        <FormLabel>{content.commentLabel}</FormLabel>
                         <FormControl>
                           <Textarea
-                            placeholder="Опишите проблему или пожелания — так мы приедем подготовленными"
+                            placeholder={content.commentPlaceholder}
                             className="min-h-28 resize-y"
                             {...field}
                           />
@@ -241,12 +243,12 @@ export function RequestForm() {
                         </FormControl>
                         <div className="space-y-1 leading-none">
                           <FormLabel className="text-sm font-normal text-muted-foreground leading-relaxed">
-                            Я согласен на обработку персональных данных и принимаю{" "}
+                            {content.consentText}{" "}
                             <Link
                               href="/privacy"
                               className="font-medium text-primary hover:underline"
                             >
-                              политику конфиденциальности
+                              {content.privacyLinkText}
                             </Link>
                           </FormLabel>
                           <FormMessage />
@@ -257,9 +259,9 @@ export function RequestForm() {
 
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2">
                     <p className="text-sm text-muted-foreground">
-                      Или позвоните напрямую:{" "}
-                      <a href="tel:+79056298708" className="font-medium text-primary hover:underline">
-                        +7 (905) 629-87-08
+                      {content.callUsPrefix}{" "}
+                      <a href={content.phoneHref} className="font-medium text-primary hover:underline">
+                        {content.phoneValue}
                       </a>
                     </p>
                     <Button
@@ -272,12 +274,12 @@ export function RequestForm() {
                       {isSubmitting ? (
                         <>
                           <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                          Отправляем…
+                          {content.submittingLabel}
                         </>
                       ) : (
                         <>
                           <Send className="mr-2 h-5 w-5" />
-                          Отправить заявку
+                          {content.submitLabel}
                         </>
                       )}
                     </Button>

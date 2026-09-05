@@ -1,8 +1,32 @@
 import { Sparkles } from "lucide-react";
 import { Link } from "wouter";
+import type { FooterContent } from "@shared/content";
 
-export function Footer() {
+/**
+ * Ссылка футера: внутренние страницы сайта (/privacy) открываем роутером,
+ * якоря и tel:/mailto: — обычным <a>, чтобы SPA-роутер не перехватывал их.
+ */
+function FooterLink({ href, label }: { href: string; label: string }) {
+  if (href.startsWith("/") && !href.startsWith("//")) {
+    return (
+      <Link
+        href={href}
+        className="hover:text-primary transition-colors"
+      >
+        {label}
+      </Link>
+    );
+  }
+  return (
+    <a href={href} className="hover:text-primary transition-colors">
+      {label}
+    </a>
+  );
+}
+
+export function Footer({ content }: { content: FooterContent }) {
   const currentYear = new Date().getFullYear();
+  const copyright = content.copyrightText.replace(/\{year\}/g, String(currentYear));
 
   return (
     <footer className="bg-card border-t py-12">
@@ -10,47 +34,32 @@ export function Footer() {
         <div className="grid md:grid-cols-3 gap-8 mb-8">
           <div>
             <h3 className="font-bold text-lg mb-4" data-testid="text-footer-company">
-              Домофонная служба | ИП Бухтеев
+              {content.companyTitle}
             </h3>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              Профессиональная установка и ремонт домофонных систем с гарантией качества.
+              {content.companyDescription}
             </p>
           </div>
-          
+
           <div>
-            <h4 className="font-semibold mb-4">Услуги</h4>
+            <h4 className="font-semibold mb-4">{content.servicesTitle}</h4>
             <ul className="space-y-2 text-sm text-muted-foreground">
-              <li>
-                <a href="#services" className="hover:text-primary transition-colors" data-testid="link-footer-installation">
-                  Установка домофонов
-                </a>
-              </li>
-              <li>
-                <a href="#services" className="hover:text-primary transition-colors" data-testid="link-footer-repair">
-                  Ремонт и обслуживание
-                </a>
-              </li>
-              <li>
-                <a href="#request-form" className="hover:text-primary transition-colors" data-testid="link-footer-request">
-                  Оставить заявку
-                </a>
-              </li>
+              {content.servicesLinks.map((link) => (
+                <li key={`${link.label}-${link.href}`}>
+                  <FooterLink href={link.href} label={link.label} />
+                </li>
+              ))}
             </ul>
           </div>
 
           <div>
-            <h4 className="font-semibold mb-4">Контакты</h4>
+            <h4 className="font-semibold mb-4">{content.contactsTitle}</h4>
             <ul className="space-y-2 text-sm text-muted-foreground">
-              <li>
-                <a href="tel:+79056298708" className="hover:text-primary transition-colors" data-testid="link-footer-phone">
-                  +7 (905) 629-87-08
-                </a>
-              </li>
-              <li>
-                <a href="mailto:info@domofon-service.ru" className="hover:text-primary transition-colors" data-testid="link-footer-email">
-                  info@domofon-service.ru
-                </a>
-              </li>
+              {content.contactsLinks.map((link) => (
+                <li key={`${link.label}-${link.href}`}>
+                  <FooterLink href={link.href} label={link.label} />
+                </li>
+              ))}
             </ul>
           </div>
         </div>
@@ -58,35 +67,33 @@ export function Footer() {
         <div className="pt-8 border-t">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground" data-testid="text-footer-copyright">
-              © {currentYear} ИП Бухтеев. Все права защищены.
+              {copyright}
             </p>
             <p
               className="text-sm text-muted-foreground flex items-center gap-1.5"
               data-testid="text-footer-credit"
             >
               <Sparkles className="h-3.5 w-3.5 text-primary" />
-              <span>Разработано в</span>
+              <span>{content.developedByText}</span>
               <a
-                href="https://mp-webstudio.ru"
+                href={content.studioHref}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-semibold text-foreground hover:text-primary transition-colors"
                 data-testid="link-footer-credit"
               >
-                MP Web Studio
+                {content.studioName}
               </a>
             </p>
           </div>
           <div className="mt-4 pt-4 border-t flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-muted-foreground">
-            <p data-testid="text-footer-requisites">
-              ИП Бухтеев Сергей Валерьевич · ИНН 711610551800 · ОГРНИП 309715404200227
-            </p>
+            <p data-testid="text-footer-requisites">{content.requisites}</p>
             <Link
-              href="/privacy"
+              href={content.privacyHref}
               className="hover:text-primary transition-colors"
               data-testid="link-footer-privacy"
             >
-              Политика конфиденциальности
+              {content.privacyText}
             </Link>
           </div>
         </div>

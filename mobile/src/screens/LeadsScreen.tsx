@@ -16,6 +16,8 @@ import {
   api,
   serviceLabel,
   LEAD_STATUSES,
+  cacheLeads,
+  getCachedLeads,
   type Lead,
   type LeadStatus,
 } from "../api";
@@ -27,6 +29,7 @@ interface Props {
   onAdd: () => void;
   onEdit: (lead: Lead) => void;
   onScan: () => void;
+  onContent: () => void;
 }
 
 function formatDate(iso: string): string {
@@ -69,11 +72,13 @@ async function registerPushToken(token: string) {
   }
 }
 
-export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan }: Props) {
+export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan, onContent }: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Флаг офлайн-режима: true когда нет подключения к серверу
+  const [isOffline, setIsOffline] = useState(false);
 
   const load = useCallback(
     async (asRefresh = false) => {
@@ -82,8 +87,19 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan }: Props) {
       try {
         const data = await api.leads(token);
         setLeads(data ?? []);
+        setIsOffline(false);
+        // Сохраняем свежие данные в кеш
+        await cacheLeads(data ?? []);
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Не удалось загрузить заявки");
+        // При ошибке сети — пробуем показать кеш
+        const cached = await getCachedLeads();
+        if (cached.length > 0) {
+          setLeads(cached);
+          setIsOffline(true);
+          setError(null);
+        } else {
+          setError(e instanceof Error ? e.message : "Не удалось загрузить заявки");
+        }
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -93,7 +109,17 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan }: Props) {
   );
 
   useEffect(() => {
-    load();
+    // Сначала показываем кеш мгновенно (без спиннера), потом обновляем
+    (async () => {
+      const cached = await getCachedLeads();
+      if (cached.length > 0) {
+        setLeads(cached);
+        setLoading(false);
+      }
+      // Запускаем загрузку с сервера
+      load();
+    })();
+
     registerPushToken(token);
 
     // Перезагружаем список, когда приходит уведомление (приложение открыто)
@@ -229,6 +255,9 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan }: Props) {
           </Text>
         </View>
         <View style={styles.headerActions}>
+          <Pressable onPress={onContent} hitSlop={12} style={styles.scanButton}>
+            <Text style={styles.scanButtonText}>🌐 Сайт</Text>
+          </Pressable>
           <Pressable onPress={onScan} hitSlop={12} style={styles.scanButton}>
             <Text style={styles.scanButtonText}>📷 Блокнот</Text>
           </Pressable>
@@ -247,7 +276,15 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan }: Props) {
         </View>
       </View>
 
-      {loading ? (
+      {/* Плашка офлайн-режима */}
+      {isOffline && (
+        <View style={styles.offlineBanner}>
+          <Text style={styles.offlineText}>
+            📡 Офлайн-режим · данные могут быть неактуальны
+          </Text>
+        </View>
+      )}
+      {loading && leads.length === 0 ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.primary} />
         </View>
@@ -468,6 +505,19 @@ const styles = StyleSheet.create({
   cardHint: {
     color: colors.textMuted,
     fontSize: 11,
+  },
+  offlineBanner: {
+    backgroundColor: "rgba(245,158,11,0.15)",
+    borderBottomWidth: 1,
+    borderBottomColor: "#f59e0b",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  offlineText: {
+    color: "#fbbf24",
+    fontSize: 13,
+    fontWeight: "600",
+    textAlign: "center",
   },
   center: {
     flex: 1,

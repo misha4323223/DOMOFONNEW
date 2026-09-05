@@ -8,6 +8,34 @@ import { notifyNewLead } from "./push";
 import { saveDeviceToken, removeDeviceToken } from "./ydb";
 import { recognizeHandwritten } from "./vision";
 import { parseCandidates } from "./parse";
+import {
+  sanitizeContent,
+  HERO_IMAGE_KEYS,
+  type HomeContent,
+} from "@shared/content";
+
+// --- Контент главной страницы (глубокий редактор в админке) ---
+// Хранится в key/value-таблице настроек одним JSON-документом.
+// Фото первого экрана — отдельными ключами (у записи YDB есть лимит ~400 КБ,
+// поэтому фото не кладём внутрь JSON с текстами).
+const CONTENT_SETTING_KEY = "content:home";
+const IMAGE_SETTING_PREFIX = "image:";
+// Лимит data-url фото: ~400 КБ на запись YDB; клиент сжимает фото до webp.
+const MAX_IMAGE_DATA_URL_LENGTH = 400_000;
+
+const IMAGE_DATA_URL_RE = /^data:image\/(webp|jpeg|png);base64,/i;
+const IMAGE_DATA_URL_BODY_RE = /^data:(image\/[a-z+]+);base64,([\s\S]+)$/i;
+
+function isHeroImageKey(key: unknown): key is string {
+  return (
+    typeof key === "string" &&
+    (HERO_IMAGE_KEYS as readonly string[]).includes(key)
+  );
+}
+
+function imageSettingKey(key: string): string {
+  return `${IMAGE_SETTING_PREFIX}${key}`;
+}
 
 // --- Админка: простая авторизация по паролю ---
 // Пароль задаётся переменной окружения ADMIN_PASSWORD.
@@ -220,6 +248,86 @@ export async function registerRoutes(app: Express): Promise<Server> {
         message: "Не удалось распознать текст (Yandex Vision)",
       });
     }
+  }));
+
+  // Публичный контент главной страницы — читает и сайт, и админка-редактор
+  app.get("/api/content", asyncHandler(async (_req: Request, res: Response) => {
+    const saved = await storage.getSetting(CONTENT_SETTING_KEY);
+    let overrides: unknown = {};
+    if (saved) {
+      try {
+        overrides = JSON.parse(saved.value);
+      } catch {
+        // Битые данные не должны ронять сайт — используем дефолты
+        console.error("Контент сайта повреждён, используем значения по умолчанию");
+      }
+    }
+    const content = sanitizeContent(overrides);
+    // max-age=0: правки из админки видны на сайте сразу после перезагрузки
+    res.set("Cache-Control", "public, max-age=0, must-revalidate");
+    return res.json({ content, updatedAt: saved?.updatedAt ?? null });
+  }));
+
+  // Сохранение контента из редактора админки
+  app.put("/api/admin/content", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const content: unknown = req.body?.content;
+    if (typeof content !== "object" || content === null) {
+      return res.status(400).json({ message: "Некорректные данные контента" });
+    }
+    const clean = sanitizeContent(content) as HomeContent;
+    await storage.setSetting(CONTENT_SETTING_KEY, JSON.stringify(clean));
+    const updatedAt = new Date().toISOString();
+    return res.json({ ok: true, content: clean, updatedAt });
+  }));
+
+  // Загрузка своего фото для первого экрана (data-url, сжатый webp/jpeg/png)
+  app.put("/api/admin/content/image", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const key = req.body?.key;
+    const dataUrl = typeof req.body?.dataUrl === "string" ? req.body.dataUrl : "";
+    if (!isHeroImageKey(key)) {
+      return res.status(400).json({ message: "Неизвестный ключ изображения" });
+    }
+    if (!IMAGE_DATA_URL_RE.test(dataUrl)) {
+      return res.status(400).json({ message: "Поддерживаются фото webp, jpeg или png" });
+    }
+    if (dataUrl.length > MAX_IMAGE_DATA_URL_LENGTH) {
+      return res.status(400).json({
+        message: "Фото слишком большое — загрузите файл поменьше (до ~300 КБ)",
+      });
+    }
+    await storage.setSetting(imageSettingKey(key), dataUrl);
+    return res.json({ ok: true, url: `/api/content/image/${key}` });
+  }));
+
+  // Удаление загруженного фото (вернуть стандартное из сборки)
+  app.delete("/api/admin/content/image/:key", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const { key } = req.params;
+    if (!isHeroImageKey(key)) {
+      return res.status(400).json({ message: "Неизвестный ключ изображения" });
+    }
+    await storage.removeSetting(imageSettingKey(key));
+    return res.json({ ok: true });
+  }));
+
+  // Отдача загруженного фото по публичному адресу
+  app.get("/api/content/image/:key", asyncHandler(async (req: Request, res: Response) => {
+    const { key } = req.params;
+    if (!isHeroImageKey(key)) {
+      return res.status(404).json({ message: "Изображение не найдено" });
+    }
+    const saved = await storage.getSetting(imageSettingKey(key));
+    if (!saved) {
+      return res.status(404).json({ message: "Изображение не найдено" });
+    }
+    const match = IMAGE_DATA_URL_BODY_RE.exec(saved.value);
+    if (!match) {
+      return res.status(500).json({ message: "Изображение повреждено" });
+    }
+    const mime = match[1].toLowerCase();
+    const buffer = Buffer.from(match[2], "base64");
+    res.set("Content-Type", mime);
+    res.set("Cache-Control", "public, max-age=86400");
+    return res.send(buffer);
   }));
 
   // Регистрация push-токена мобильного приложения (Expo)

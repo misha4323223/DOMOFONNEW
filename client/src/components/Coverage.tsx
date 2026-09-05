@@ -1,47 +1,42 @@
 import { MapPin, PhoneCall } from "lucide-react";
+import type { CoverageContent, CoverageMode } from "@shared/content";
 
-const cities = [
-  {
-    name: "Богородицк",
-    note: "Установка и ремонт домофонов, выезд мастера по городу и району",
-  },
-  {
-    name: "Щёкино",
-    note: "Домофоны и видеодомофоны в квартирах, домах и на подъездах",
-  },
-  {
-    name: "Ефремов",
-    note: "Обслуживание и ремонт домофонных систем, выезд мастера",
-  },
-];
+function normalizeMode(mode: string | undefined): CoverageMode {
+  return mode === "visible" || mode === "hidden" ? mode : "seo-only";
+}
 
-export function Coverage() {
-  // Блок скрыт визуально (sr-only), но остаётся в HTML и доступен поисковикам:
-  // в нём ключевые фразы — ИП Бухтеев, города и зона работы. Если блок снова
-  // нужно показать — уберите класс sr-only из <section>.
+export function Coverage({ content }: { content: CoverageContent }) {
+  const mode = normalizeMode(content.mode);
+
+  // hidden — блок полностью убран со страницы (и из HTML для поисковиков).
+  if (mode === "hidden") return null;
+
+  // seo-only — блок скрыт визуально (sr-only), но остаётся в HTML и доступен
+  // поисковикам: в нём ключевые фразы — ИП Бухтеев, города и зона работы.
+  // Если блок снова нужно показать посетителям — выберите «visible» в админке.
   return (
-    <section className="sr-only" id="coverage">
+    <section
+      className={mode === "seo-only" ? "sr-only" : undefined}
+      id="coverage"
+    >
       <div className="max-w-6xl mx-auto px-6">
         <div className="text-center max-w-3xl mx-auto mb-12">
           <h2
             className="text-3xl md:text-4xl font-bold mb-4"
             data-testid="text-coverage-title"
           >
-            Установка и ремонт домофонов в Богородицке, Щёкино и Ефремове
+            {content.title}
           </h2>
           <p
             className="text-lg text-muted-foreground leading-relaxed"
             data-testid="text-coverage-subtitle"
           >
-            ИП Бухтеев — домофонная служба в Тульской области. Устанавливаем,
-            ремонтируем и обслуживаем домофоны, видеодомофоны и подъездные
-            домофонные системы — от квартирной трубки до вызывной панели на
-            подъезде.
+            {content.subtitle}
           </p>
         </div>
 
         <div className="grid md:grid-cols-3 gap-6">
-          {cities.map((city, index) => (
+          {content.cities.map((city, index) => (
             <div
               key={city.name}
               className="bg-card border rounded-2xl p-6 hover-elevate transition-all duration-300"
@@ -62,15 +57,14 @@ export function Coverage() {
           className="text-center text-muted-foreground mt-10"
           data-testid="text-coverage-more"
         >
-          Работаем и в других населённых пунктах Тульской области. Уточнить
-          выезд в ваш город можно по телефону:{" "}
+          {content.morePrefix}
           <a
-            href="tel:+79056298708"
+            href={content.phoneHref}
             className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
             data-testid="link-coverage-phone"
           >
             <PhoneCall className="h-4 w-4" />
-            +7 (905) 629-87-08
+            {content.phoneLabel}
           </a>
         </p>
       </div>

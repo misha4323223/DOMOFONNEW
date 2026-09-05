@@ -2,18 +2,15 @@ import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./ThemeToggle";
 import { Menu, X } from "lucide-react";
 import { useState } from "react";
+import type { HeaderContent } from "@shared/content";
 
 interface HeaderProps {
+  content: HeaderContent;
   onRequestClick: () => void;
 }
 
-export function Header({ onRequestClick }: HeaderProps) {
+export function Header({ content, onRequestClick }: HeaderProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-
-  const navItems = [
-    { label: "Услуги", href: "#services" },
-    { label: "Контакты", href: "#contact" }
-  ];
 
   const scrollToSection = (href: string) => {
     const element = document.querySelector(href);
@@ -30,19 +27,21 @@ export function Header({ onRequestClick }: HeaderProps) {
           <div className="flex items-center gap-2">
             <div className="leading-tight">
               <h1 className="text-lg font-bold" data-testid="text-header-logo">
-                Домофонная служба
+                {content.logoTitle}
               </h1>
-              <p className="text-xs text-muted-foreground" data-testid="text-header-legal">
-                ИП Бухтеев
-              </p>
+              {content.logoSubtitle && (
+                <p className="text-xs text-muted-foreground" data-testid="text-header-legal">
+                  {content.logoSubtitle}
+                </p>
+              )}
             </div>
           </div>
 
           {/* Desktop Navigation */}
           <nav className="hidden md:flex items-center gap-6">
-            {navItems.map((item) => (
+            {content.nav.map((item) => (
               <button
-                key={item.href}
+                key={`${item.label}-${item.href}`}
                 onClick={() => scrollToSection(item.href)}
                 className="text-sm font-medium text-muted-foreground hover:text-primary transition-colors"
                 data-testid={`link-nav-${item.label.toLowerCase()}`}
@@ -50,11 +49,11 @@ export function Header({ onRequestClick }: HeaderProps) {
                 {item.label}
               </button>
             ))}
-            <Button 
+            <Button
               onClick={onRequestClick}
               data-testid="button-header-request"
             >
-              Оставить заявку
+              {content.ctaText}
             </Button>
             <ThemeToggle />
           </nav>
@@ -77,9 +76,9 @@ export function Header({ onRequestClick }: HeaderProps) {
         {mobileMenuOpen && (
           <nav className="md:hidden py-4 border-t">
             <div className="flex flex-col gap-4">
-              {navItems.map((item) => (
+              {content.nav.map((item) => (
                 <button
-                  key={item.href}
+                  key={`${item.label}-${item.href}`}
                   onClick={() => scrollToSection(item.href)}
                   className="text-sm font-medium text-muted-foreground hover:text-primary transition-colors text-left"
                   data-testid={`link-mobile-${item.label.toLowerCase()}`}
@@ -87,7 +86,7 @@ export function Header({ onRequestClick }: HeaderProps) {
                   {item.label}
                 </button>
               ))}
-              <Button 
+              <Button
                 onClick={() => {
                   onRequestClick();
                   setMobileMenuOpen(false);
@@ -95,7 +94,7 @@ export function Header({ onRequestClick }: HeaderProps) {
                 className="w-full"
                 data-testid="button-mobile-request"
               >
-                Оставить заявку
+                {content.ctaText}
               </Button>
             </div>
           </nav>
