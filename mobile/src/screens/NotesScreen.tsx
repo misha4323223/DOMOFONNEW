@@ -29,7 +29,7 @@ import {
   queueNoteUpdate,
   useSyncState,
 } from "../sync";
-import { getMyName } from "../profile";
+import { getMyProfile } from "../profile";
 import { colors } from "../theme";
 
 interface Props {
@@ -60,7 +60,7 @@ export function NotesScreen({ token, onBack }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
   const [input, setInput] = useState("");
-  const [myName, setMyName] = useState("Админ");
+  const [myCity, setMyCity] = useState("Админ");
   // Редактирование заметки (модалка)
   const [editing, setEditing] = useState<Note | null>(null);
   const [editText, setEditText] = useState("");
@@ -69,8 +69,8 @@ export function NotesScreen({ token, onBack }: Props) {
 
   useEffect(() => {
     (async () => {
-      const name = await getMyName();
-      if (name) setMyName(name);
+      const p = await getMyProfile();
+      if (p.city) setMyCity(p.city);
     })();
   }, []);
 
@@ -124,7 +124,7 @@ export function NotesScreen({ token, onBack }: Props) {
     const local: Note = {
       id: clientId,
       text,
-      author: myName,
+      author: myCity,
       done: "0",
       createdAt: now,
       updatedAt: now,
@@ -132,7 +132,7 @@ export function NotesScreen({ token, onBack }: Props) {
     // Оптимистично добавляем сразу
     setNotes((prev) => [local, ...prev]);
     try {
-      const created = await api.createNote(token, text, myName);
+      const created = await api.createNote(token, text, myCity);
       setNotes((prev) =>
         prev.map((n) => (n.id === clientId ? { ...created } : n)),
       );
@@ -144,7 +144,7 @@ export function NotesScreen({ token, onBack }: Props) {
     } catch (e) {
       if (isNetworkError(e) || isServerError(e)) {
         // Нет связи — заметка уйдёт в очередь
-        await queueNoteCreate(clientId, { text, author: myName }, local);
+        await queueNoteCreate(clientId, { text, author: myCity }, local);
         setIsOffline(true);
       } else {
         setNotes((prev) => prev.filter((n) => n.id !== clientId));

@@ -14,31 +14,33 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { api } from "../api";
 import { colors } from "../theme";
 import { checkForUpdate, downloadAndRestart } from "../updates";
-import { getMyName, saveMyName } from "../profile";
+import { getMyProfile, saveMyProfile } from "../profile";
 
 interface Props {
   onLogin: (token: string) => void;
 }
 
 export function LoginScreen({ onLogin }: Props) {
-  const [name, setName] = useState("");
+  const [city, setCity] = useState("");
+  const [address, setAddress] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
-  // Подставляем имя с прошлого входа (Вариант А: имя живёт на телефоне)
+  // Подставляем профиль с прошлого входа
   useEffect(() => {
     (async () => {
-      const saved = await getMyName();
-      if (saved) setName(saved);
+      const saved = await getMyProfile();
+      if (saved.city) setCity(saved.city);
+      if (saved.address) setAddress(saved.address);
     })();
   }, []);
 
   const submit = async () => {
-    const trimmedName = name.trim();
-    if (!trimmedName || busy) {
-      if (!trimmedName) setError("Введите имя — оно подписывается под заметками и сообщениями");
+    const trimmedCity = city.trim();
+    if (!trimmedCity || busy) {
+      if (!trimmedCity) setError("Введите город — он подписывается под сообщениями");
       return;
     }
     if (!password.trim()) {
@@ -49,7 +51,7 @@ export function LoginScreen({ onLogin }: Props) {
     setError(null);
     try {
       const res = await api.login(password.trim());
-      await saveMyName(trimmedName);
+      await saveMyProfile({ city: trimmedCity, address: address.trim() });
       onLogin(res.token);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось войти");
@@ -58,8 +60,7 @@ export function LoginScreen({ onLogin }: Props) {
     }
   };
 
-  // Ручная проверка OTA-обновлений (например, если обновление вышло,
-  // пока приложение было открыто)
+  // Ручная проверка OTA-обновлений
   const checkUpdate = async () => {
     if (checkingUpdate) return;
     setCheckingUpdate(true);
@@ -97,12 +98,23 @@ export function LoginScreen({ onLogin }: Props) {
 
           <TextInput
             style={styles.input}
-            placeholder="Ваше имя (для заметок и чата)"
+            placeholder="Город"
             placeholderTextColor={colors.textMuted}
             autoCapitalize="words"
             autoCorrect={false}
-            value={name}
-            onChangeText={setName}
+            value={city}
+            onChangeText={setCity}
+            returnKeyType="next"
+          />
+
+          <TextInput
+            style={styles.input}
+            placeholder="Улица, дом, подъезд"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="words"
+            autoCorrect={false}
+            value={address}
+            onChangeText={setAddress}
             returnKeyType="next"
           />
 

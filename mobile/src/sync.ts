@@ -50,7 +50,7 @@ export type OfflineOp =
   | { id: string; kind: "note:create"; clientId: string; note: NoteInput; createdAt: number }
   | { id: string; kind: "note:update"; noteId: string; patch: NotePatch; createdAt: number }
   | { id: string; kind: "note:delete"; noteId: string; createdAt: number }
-  | { id: string; kind: "chat:send"; clientId: string; text: string; sender: string; createdAt: number };
+  | { id: string; kind: "chat:send"; clientId: string; text: string; sender: string; address: string; createdAt: number };
 
 /** Операция без служебных полей — то, что кладут экраны в очередь. */
 export type OfflineOpInput =
@@ -63,7 +63,7 @@ export type OfflineOpInput =
   | { kind: "note:create"; clientId: string; note: NoteInput }
   | { kind: "note:update"; noteId: string; patch: NotePatch }
   | { kind: "note:delete"; noteId: string }
-  | { kind: "chat:send"; clientId: string; text: string; sender: string };
+  | { kind: "chat:send"; clientId: string; text: string; sender: string; address: string };
 
 export interface SyncState {
   /** Есть ли связь с сервером (по последнему запросу). */
@@ -248,8 +248,9 @@ export async function queueChatSend(
   clientId: string,
   text: string,
   sender: string,
+  address: string,
 ): Promise<void> {
-  await enqueue({ kind: "chat:send", clientId, text, sender });
+  await enqueue({ kind: "chat:send", clientId, text, sender, address });
 }
 
 /** clientId сообщений чата, которые ещё ждут отправки (для пометки «⏳»). */
@@ -314,7 +315,7 @@ async function executeOp(
       await api.deleteNote(token, op.noteId);
       return {};
     case "chat:send":
-      await api.sendChatMessage(token, op.text, op.sender);
+      await api.sendChatMessage(token, op.text, op.sender, op.address);
       return {};
   }
 }
@@ -333,10 +334,19 @@ export async function flushPending(
   token: string | null | undefined,
 ): Promise<FlushResult> {
   if (!token) return { sent: 0 };
-  const ops = await readQueue();
+  let ops = await readQueue();
   if (ops.length === 0) {
     setSyncState({ online: true });
     return { sent: 0 };
+  }
+
+  // Удаляем операции старше 10 минут — они застряли из-за постоянных ошибок сервера.
+  const MAX_OP_AGE_MS = 10 * 60 * 1000;
+  const now = Date.now();
+  const staleOps = ops.filter((op) => now - op.createdAt > MAX_OP_AGE_MS);
+  if (staleOps.length > 0) {
+    ops = ops.filter((op) => now - op.createdAt <= MAX_OP_AGE_MS);
+    await writeQueue(ops);
   }
 
   let sent = 0;

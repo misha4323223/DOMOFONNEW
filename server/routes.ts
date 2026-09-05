@@ -485,9 +485,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     const message = await storage.sendChatMessage({
       sender: cleanName(req.body?.sender),
+      address: typeof req.body?.address === "string" ? req.body.address.trim() : "",
       text,
     });
     return res.status(201).json(message);
+  }));
+
+  app.patch("/api/chat/messages/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+    if (!text) {
+      return res.status(400).json({ message: "Введите текст сообщения" });
+    }
+    const updated = await storage.updateChatMessage(req.params.id, { text });
+    if (!updated) {
+      return res.status(404).json({ message: "Сообщение не найдено" });
+    }
+    return res.json(updated);
+  }));
+
+  app.delete("/api/chat/messages/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    await storage.deleteChatMessage(req.params.id);
+    return res.json({ ok: true });
   }));
 
   const httpServer = createServer(app);

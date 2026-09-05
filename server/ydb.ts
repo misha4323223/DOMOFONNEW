@@ -426,22 +426,32 @@ async function ensureChatTable(): Promise<void> {
 export interface ChatMessage {
   id: string;
   sender: string;
+  /** Адрес отправителя (улица, дом, подъезд). */
+  address: string;
   text: string;
   createdAt: string;
+  /** Если сообщение было отредактировано. */
+  editedAt?: string;
 }
 
 export interface ChatMessageInput {
   sender: string;
+  address: string;
   text: string;
 }
 
 function toChatItem(message: ChatMessage): Record<string, unknown> {
-  return {
+  const item: Record<string, unknown> = {
     id: { S: message.id },
     sender: { S: message.sender },
+    address: { S: message.address ?? "" },
     text: { S: message.text },
     createdAt: { S: message.createdAt },
   };
+  if (message.editedAt) {
+    item.editedAt = { S: message.editedAt };
+  }
+  return item;
 }
 
 function fromChatItem(
@@ -450,8 +460,10 @@ function fromChatItem(
   return {
     id: item.id?.S ?? "",
     sender: item.sender?.S ?? "",
+    address: item.address?.S ?? "",
     text: item.text?.S ?? "",
     createdAt: item.createdAt?.S ?? "",
+    editedAt: item.editedAt?.S || undefined,
   };
 }
 
@@ -460,6 +472,7 @@ export async function sendYdbChatMessage(input: ChatMessageInput): Promise<ChatM
   const message: ChatMessage = {
     id: randomUUID(),
     sender: input.sender,
+    address: input.address ?? "",
     text: input.text,
     createdAt: new Date().toISOString(),
   };
@@ -481,4 +494,27 @@ export async function listYdbChatMessages(
   const filtered = after ? all.filter((m) => m.createdAt > after) : all;
   // Возвращаем последние `limit` сообщений (по возрастанию времени).
   return filtered.length > limit ? filtered.slice(filtered.length - limit) : filtered;
+}
+
+export async function updateYdbChatMessage(
+  id: string,
+  patch: { text?: string },
+): Promise<ChatMessage | undefined> {
+  await ensureChatTable();
+  const messages = await listYdbChatMessages();
+  const current = messages.find((m) => m.id === id);
+  if (!current) return undefined;
+  const updated: ChatMessage = {
+    ...current,
+    text: patch.text ?? current.text,
+    editedAt: new Date().toISOString(),
+  };
+  await docApi("PutItem", { TableName: CHAT_TABLE, Item: toChatItem(updated) });
+  return updated;
+}
+
+export async function deleteYdbChatMessage(id: string): Promise<boolean> {
+  await ensureChatTable();
+  await docApi("DeleteItem", { TableName: CHAT_TABLE, Key: { id: { S: id } } });
+  return true;
 }

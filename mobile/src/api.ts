@@ -218,15 +218,26 @@ export const api = {
     request(
       `/api/chat/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`,
       { token },
-    ) as Promise<ChatMessage[]>,
-
-  sendChatMessage: (token: string, text: string, sender: string) =>
+    ) as Promise<ChatMessage[]>,  sendChatMessage: (token: string, text: string, sender: string, address: string) =>
     request("/api/chat/messages", {
       method: "POST",
-      body: { text, sender },
+      body: { text, sender, address },
       token,
     }) as Promise<ChatMessage>,
-};
+
+  updateChatMessage: (token: string, id: string, text: string) =>
+    request(`/api/chat/messages/${id}`, {
+      method: "PATCH",
+      body: { text },
+      token,
+    }) as Promise<ChatMessage>,
+
+  deleteChatMessage: (token: string, id: string) =>
+    request(`/api/chat/messages/${id}`, {
+      method: "DELETE",
+      token,
+    }) as Promise<{ ok: boolean }>,
+  };
 
 export interface Note {
   id: string;
@@ -270,8 +281,10 @@ export async function getCachedNotes(): Promise<Note[]> {
 export interface ChatMessage {
   id: string;
   sender: string;
+  address: string;
   text: string;
   createdAt: string;
+  editedAt?: string;
 }
 
 export interface LeadCandidate {

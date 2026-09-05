@@ -14,6 +14,8 @@ import {
   deleteYdbNote,
   sendYdbChatMessage,
   listYdbChatMessages,
+  updateYdbChatMessage,
+  deleteYdbChatMessage,
   type StoredSetting,
   type Note,
   type NoteInput,
@@ -41,6 +43,8 @@ export interface IStorage {
   deleteNote(id: string): Promise<boolean>;
   sendChatMessage(message: ChatMessageInput): Promise<ChatMessage>;
   listChatMessages(after?: string): Promise<ChatMessage[]>;
+  updateChatMessage(id: string, patch: { text?: string }): Promise<ChatMessage | undefined>;
+  deleteChatMessage(id: string): Promise<boolean>;
 }
 
 export class MemStorage implements IStorage {
@@ -165,6 +169,7 @@ export class MemStorage implements IStorage {
     const message: ChatMessage = {
       id: randomUUID(),
       sender: input.sender,
+      address: input.address ?? "",
       text: input.text,
       createdAt: new Date().toISOString(),
     };
@@ -177,6 +182,24 @@ export class MemStorage implements IStorage {
     return Array.from(this.chat.values())
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .filter((m) => !after || m.createdAt > after);
+  }
+
+  async updateChatMessage(id: string, patch: { text?: string }): Promise<ChatMessage | undefined> {
+    if (this.useYdb) return updateYdbChatMessage(id, patch);
+    const msg = this.chat.get(id);
+    if (!msg) return undefined;
+    const updated: ChatMessage = {
+      ...msg,
+      text: patch.text ?? msg.text,
+      editedAt: new Date().toISOString(),
+    };
+    this.chat.set(id, updated);
+    return updated;
+  }
+
+  async deleteChatMessage(id: string): Promise<boolean> {
+    if (this.useYdb) return deleteYdbChatMessage(id);
+    return this.chat.delete(id);
   }
 }
 

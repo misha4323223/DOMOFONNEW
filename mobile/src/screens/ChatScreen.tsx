@@ -24,7 +24,7 @@ import {
   queueChatSend,
   useSyncState,
 } from "../sync";
-import { getMyName } from "../profile";
+import { getMyProfile, type UserProfile } from "../profile";
 import { colors } from "../theme";
 
 interface Props {
@@ -60,10 +60,12 @@ export function ChatScreen({ token, onBack }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [input, setInput] = useState("");
-  const [myName, setMyName] = useState("Админ");
+  const [profile, setProfile] = useState<UserProfile>({ city: "Админ", address: "" });
   const [loading, setLoading] = useState(true);
   const [isOffline, setIsOffline] = useState(false);
   const [sending, setSending] = useState(false);
+  /** ID сообщения, которое сейчас редактируется. null — обычный ввод. */
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const listRef = useRef<FlatList<ChatMessage | PendingMessage>>(null);
   const lastCreatedRef = useRef<string | undefined>(undefined);
@@ -71,8 +73,8 @@ export function ChatScreen({ token, onBack }: Props) {
 
   useEffect(() => {
     (async () => {
-      const name = await getMyName();
-      if (name) setMyName(name);
+      const p = await getMyProfile();
+      if (p.city) setProfile(p);
     })();
   }, []);
 
@@ -125,13 +127,42 @@ export function ChatScreen({ token, onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revision]);
 
+  /** Отправить новое сообщение или обновить редактируемое. */
   const send = async () => {
     const text = input.trim();
     if (!text || sending) return;
+
+    // --- Режим редактирования ---
+    if (editingId) {
+      const msgId = editingId;
+      setEditingId(null);
+      setInput("");
+      setSending(true);
+      try {
+        const updated = await api.updateChatMessage(token, msgId, text);
+        if (updated) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === msgId ? updated : m)),
+          );
+        }
+      } catch (e) {
+        Alert.alert(
+          "Ошибка",
+          e instanceof Error ? e.message : "Не удалось отредактировать",
+        );
+        setInput(text);
+        setEditingId(msgId);
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    // --- Обычная отправка ---
     setInput("");
     setSending(true);
     try {
-      const created = await api.sendChatMessage(token, text, myName);
+      const created = await api.sendChatMessage(token, text, profile.city, profile.address);
       setMessages((prev) => [...prev, created]);
       lastCreatedRef.current = created.createdAt;
       setIsOffline(false);
@@ -139,8 +170,8 @@ export function ChatScreen({ token, onBack }: Props) {
       if (isNetworkError(e) || isServerError(e)) {
         // Нет связи — сообщение уходит в очередь и отправится само
         const clientId = genId();
-        setPending((prev) => [...prev, { clientId, text, sender: myName }]);
-        await queueChatSend(clientId, text, myName);
+        setPending((prev) => [...prev, { clientId, text, sender: profile.city }]);
+        await queueChatSend(clientId, text, profile.city, profile.address);
         setIsOffline(true);
       } else {
         Alert.alert(
@@ -152,6 +183,56 @@ export function ChatScreen({ token, onBack }: Props) {
     } finally {
       setSending(false);
     }
+  };
+
+  /** Долгое нажатие на своё сообщение — меню редактирования / удаления. */
+  const onLongPress = (item: ChatMessage | PendingMessage) => {
+    if ("clientId" in item) return; // офлайн-сообщения нельзя
+    const msg = item as ChatMessage;
+    if (msg.sender !== profile.city) return; // чужие тоже
+
+    Alert.alert("Сообщение", msg.text, [
+      {
+        text: "Редактировать",
+        onPress: () => {
+          setEditingId(msg.id);
+          setInput(msg.text);
+        },
+      },
+      {
+        text: "Удалить",
+        style: "destructive",
+        onPress: () => {
+          Alert.alert("Удалить сообщение?", "Это действие нельзя отменить", [
+            { text: "Отмена", style: "cancel" },
+            {
+              text: "Удалить",
+              style: "destructive",
+              onPress: async () => {
+                try {
+                  await api.deleteChatMessage(token, msg.id);
+                  setMessages((prev) => prev.filter((m) => m.id !== msg.id));
+                } catch (e) {
+                  Alert.alert(
+                    "Ошибка",
+                    e instanceof Error
+                      ? e.message
+                      : "Не удалось удалить сообщение",
+                  );
+                }
+              },
+            },
+          ]);
+        },
+      },
+      { text: "Отмена", style: "cancel" },
+    ]);
+  };
+
+  /** Отмена редактирования. */
+  const cancelEdit = () => {
+    setEditingId(null);
+    setInput("");
   };
 
   // Склеиваем серверные сообщения и «ожидающие» (офлайн) в один список.
@@ -166,16 +247,27 @@ export function ChatScreen({ token, onBack }: Props) {
   };
 
   const renderItem = ({ item }: { item: ChatMessage | PendingMessage }) => {
-    const isOwn = item.sender === myName;
+    const isOwn = item.sender === profile.city;
     const isPending = "clientId" in item;
+    const isEdited =
+      !isPending && "editedAt" in item && (item as ChatMessage).editedAt;
     return (
-      <View
+      <Pressable
+        onLongPress={() => onLongPress(item)}
+        delayLongPress={400}
         style={[
           styles.bubbleWrap,
           isOwn ? styles.bubbleWrapOwn : styles.bubbleWrapOther,
         ]}
       >
-        {!isOwn ? <Text style={styles.bubbleSender}>{item.sender}</Text> : null}
+        {!isOwn ? (
+          <>
+            <Text style={styles.bubbleSender}>{item.sender}</Text>
+            {"address" in item && (item as ChatMessage).address ? (
+              <Text style={styles.bubbleAddress}>{(item as ChatMessage).address}</Text>
+            ) : null}
+          </>
+        ) : null}
         <View
           style={[
             styles.bubble,
@@ -191,8 +283,9 @@ export function ChatScreen({ token, onBack }: Props) {
         <Text style={styles.bubbleTime}>
           {isOwn ? `Вы · ` : ""}
           {"createdAt" in item && item.createdAt ? formatTime(item.createdAt) : ""}
+          {isEdited ? " (ред.)" : ""}
         </Text>
-      </View>
+      </Pressable>
     );
   };
 
@@ -204,7 +297,7 @@ export function ChatScreen({ token, onBack }: Props) {
         </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Чат</Text>
-          <Text style={styles.headerSubtitle}>Вы — {myName}</Text>
+          <Text style={styles.headerSubtitle}>Вы — {profile.city}{profile.address ? `, ${profile.address}` : ""}</Text>
         </View>
         <View style={styles.headerSpacer} />
       </View>
@@ -214,6 +307,15 @@ export function ChatScreen({ token, onBack }: Props) {
           <Text style={styles.offlineText}>
             📡 Нет связи — сообщения отправятся, когда появится интернет
           </Text>
+        </View>
+      )}
+
+      {editingId && (
+        <View style={styles.editBanner}>
+          <Text style={styles.editBannerText}>✏️ Редактирование сообщения</Text>
+          <Pressable onPress={cancelEdit} hitSlop={8}>
+            <Text style={styles.editCancel}>✕</Text>
+          </Pressable>
         </View>
       )}
 
@@ -250,7 +352,7 @@ export function ChatScreen({ token, onBack }: Props) {
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
-            placeholder="Сообщение…"
+            placeholder={editingId ? "Редактировать…" : "Сообщение…"}
             placeholderTextColor={colors.textMuted}
             value={input}
             onChangeText={setInput}
@@ -267,7 +369,9 @@ export function ChatScreen({ token, onBack }: Props) {
             onPress={send}
             disabled={sending || !input.trim()}
           >
-            <Text style={styles.sendButtonText}>➤</Text>
+            <Text style={styles.sendButtonText}>
+              {editingId ? "✓" : "➤"}
+            </Text>
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -330,6 +434,27 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     textAlign: "center",
   },
+  editBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(59,130,246,0.15)",
+    borderBottomWidth: 1,
+    borderBottomColor: "#3b82f6",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  editBannerText: {
+    color: "#60a5fa",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  editCancel: {
+    color: "#60a5fa",
+    fontSize: 18,
+    fontWeight: "700",
+    paddingLeft: 12,
+  },
   list: {
     padding: 16,
     gap: 10,
@@ -352,6 +477,12 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     marginLeft: 4,
+  },
+  bubbleAddress: {
+    color: colors.textMuted,
+    fontSize: 10,
+    marginLeft: 4,
+    opacity: 0.7,
   },
   bubble: {
     borderRadius: 14,
