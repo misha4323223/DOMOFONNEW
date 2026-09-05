@@ -5,6 +5,7 @@ import {
   FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -18,9 +19,17 @@ import {
   LEAD_STATUSES,
   cacheLeads,
   getCachedLeads,
+  isNetworkError,
+  isServerError,
   type Lead,
   type LeadStatus,
 } from "../api";
+import {
+  flushPending,
+  queueLeadDelete,
+  queueLeadUpdate,
+  useSyncState,
+} from "../sync";
 import { colors } from "../theme";
 
 interface Props {
@@ -30,6 +39,8 @@ interface Props {
   onEdit: (lead: Lead) => void;
   onScan: () => void;
   onContent: () => void;
+  onNotes: () => void;
+  onChat: () => void;
 }
 
 function formatDate(iso: string): string {
@@ -72,13 +83,31 @@ async function registerPushToken(token: string) {
   }
 }
 
-export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan, onContent }: Props) {
+export function LeadsScreen({
+  token,
+  onLogout,
+  onAdd,
+  onEdit,
+  onScan,
+  onContent,
+  onNotes,
+  onChat,
+}: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Флаг офлайн-режима: true когда нет подключения к серверу
   const [isOffline, setIsOffline] = useState(false);
+  // Сколько изменений ждёт отправки (офлайн-очередь)
+  const { pending: pendingCount, revision } = useSyncState();
+
+  // После успешной отправки очереди (появился интернет) — перечитываем список,
+  // чтобы локальные id созданных офлайн заявок заменились на настоящие.
+  useEffect(() => {
+    if (revision > 0) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revision]);
 
   const load = useCallback(
     async (asRefresh = false) => {
@@ -90,6 +119,8 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan, onContent 
         setIsOffline(false);
         // Сохраняем свежие данные в кеш
         await cacheLeads(data ?? []);
+        // Связь есть — проталкиваем накопленные офлайн-изменения
+        await flushPending(token);
       } catch (e) {
         // При ошибке сети — пробуем показать кеш
         const cached = await getCachedLeads();
@@ -135,20 +166,27 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan, onContent 
 
   const changeStatus = async (lead: Lead, next: LeadStatus) => {
     if (lead.status === next) return;
-    // Оптимистично меняем сразу, при ошибке откатываем
+    // Оптимистично меняем сразу
     setLeads((prev) =>
       prev.map((l) => (l.id === lead.id ? { ...l, status: next } : l)),
     );
     try {
       await api.updateLead(token, lead.id, { status: next });
     } catch (e) {
-      setLeads((prev) =>
-        prev.map((l) => (l.id === lead.id ? { ...l, status: lead.status } : l)),
-      );
-      Alert.alert(
-        "Ошибка",
-        e instanceof Error ? e.message : "Не удалось обновить статус",
-      );
+      if (isNetworkError(e) || isServerError(e)) {
+        // Нет связи — изменение кладём в очередь: отправится само,
+        // когда интернет появится.
+        await queueLeadUpdate(lead.id, { status: next });
+      } else {
+        // Сервер отверг (например, токен протух) — откатываем и показываем
+        setLeads((prev) =>
+          prev.map((l) => (l.id === lead.id ? { ...l, status: lead.status } : l)),
+        );
+        Alert.alert(
+          "Ошибка",
+          e instanceof Error ? e.message : "Не удалось обновить статус",
+        );
+      }
     }
   };
 
@@ -181,10 +219,16 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan, onContent 
               await api.deleteLead(token, lead.id);
               setLeads((prev) => prev.filter((l) => l.id !== lead.id));
             } catch (e) {
-              Alert.alert(
-                "Ошибка",
-                e instanceof Error ? e.message : "Не удалось удалить",
-              );
+              if (isNetworkError(e) || isServerError(e)) {
+                // Нет связи — удаление применится, когда появится интернет
+                await queueLeadDelete(lead.id);
+                setLeads((prev) => prev.filter((l) => l.id !== lead.id));
+              } else {
+                Alert.alert(
+                  "Ошибка",
+                  e instanceof Error ? e.message : "Не удалось удалить",
+                );
+              }
             }
           },
         },
@@ -248,13 +292,30 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan, onContent 
   return (
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>Заявки</Text>
-          <Text style={styles.headerCount}>
-            {leads.length > 0 ? `${leads.length} шт.` : " "}
-          </Text>
+        {/* Верхняя строка: заголовок слева, «Выйти» всегда справа */}
+        <View style={styles.headerTop}>
+          <View>
+            <Text style={styles.headerTitle}>Заявки</Text>
+            <Text style={styles.headerCount}>
+              {leads.length > 0 ? `${leads.length} шт.` : " "}
+            </Text>
+          </View>
+          <Pressable onPress={onLogout} hitSlop={12} style={styles.logoutButton}>
+            <Text style={styles.logout}>Выйти</Text>
+          </Pressable>
         </View>
-        <View style={styles.headerActions}>
+        {/* Кнопки действий: при нехватке ширины листаются вбок */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.headerActions}
+        >
+          <Pressable onPress={onNotes} hitSlop={12} style={styles.scanButton}>
+            <Text style={styles.scanButtonText}>📝 Заметки</Text>
+          </Pressable>
+          <Pressable onPress={onChat} hitSlop={12} style={styles.scanButton}>
+            <Text style={styles.scanButtonText}>💬 Чат</Text>
+          </Pressable>
           <Pressable onPress={onContent} hitSlop={12} style={styles.scanButton}>
             <Text style={styles.scanButtonText}>🌐 Сайт</Text>
           </Pressable>
@@ -270,17 +331,17 @@ export function LeadsScreen({ token, onLogout, onAdd, onEdit, onScan, onContent 
           >
             <Text style={styles.addButtonText}>+ Добавить</Text>
           </Pressable>
-          <Pressable onPress={onLogout} hitSlop={12}>
-            <Text style={styles.logout}>Выйти</Text>
-          </Pressable>
-        </View>
+        </ScrollView>
       </View>
 
-      {/* Плашка офлайн-режима */}
-      {isOffline && (
+      {/* Плашка офлайн-режима / ожидающих отправки изменений */}
+      {(isOffline || pendingCount > 0) && (
         <View style={styles.offlineBanner}>
           <Text style={styles.offlineText}>
-            📡 Офлайн-режим · данные могут быть неактуальны
+            📡 Офлайн-режим
+            {pendingCount > 0
+              ? ` · ${pendingCount} измен. ждут отправки`
+              : " · данные могут быть неактуальны"}
           </Text>
         </View>
       )}
@@ -325,15 +386,18 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
     paddingHorizontal: 16,
-    paddingTop: 16,
+    paddingTop: 12,
     paddingBottom: 12,
+    gap: 10,
     borderBottomWidth: 1,
     borderBottomColor: colors.cardBorder,
     backgroundColor: colors.card,
+  },
+  headerTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
   headerTitle: {
     color: colors.text,
@@ -347,7 +411,20 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 14,
+    gap: 10,
+  },
+  logoutButton: {
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: colors.inputBg,
+  },
+  logout: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: "600",
   },
   scanButton: {
     borderWidth: 1,
@@ -372,11 +449,6 @@ const styles = StyleSheet.create({
     color: colors.primaryForeground,
     fontWeight: "700",
     fontSize: 14,
-  },
-  logout: {
-    color: colors.textMuted,
-    fontSize: 14,
-    fontWeight: "600",
   },
   list: {
     padding: 16,

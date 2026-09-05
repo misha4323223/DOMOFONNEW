@@ -102,9 +102,38 @@ async function request(
   }
 
   if (!res.ok) {
-    throw new Error(data?.message || `Ошибка сервера (${res.status})`);
+    // Кладём HTTP-статус в ошибку: по нему отличаем «сервер отверг» (4xx)
+    // от «сервер временно лежит» (5xx) при работе офлайн-очереди.
+    const err = new Error(
+      data?.message || `Ошибка сервера (${res.status})`,
+    ) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
   return data;
+}
+
+/**
+ * Ошибка сети (нет интернета и т.п.) — запрос можно безопасно повторить позже.
+ * В React Native fetch обычно падает с TypeError("Network request failed").
+ */
+export function isNetworkError(e: unknown): boolean {
+  if (e instanceof TypeError) return true;
+  if (
+    e instanceof Error &&
+    /network request failed|network error|failed to fetch|load failed/i.test(
+      e.message,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Временная ошибка сервера (5xx) — стоит повторить запрос позже. */
+export function isServerError(e: unknown): boolean {
+  const status = (e as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 500;
 }
 
 export const api = {
@@ -165,7 +194,85 @@ export const api = {
       method: "DELETE",
       token,
     }) as Promise<{ ok: boolean }>,
+
+  // --- Заметки (общие для всех админов) ---
+
+  notes: (token: string) => request("/api/notes", { token }) as Promise<Note[]>,
+
+  createNote: (token: string, text: string, author: string) =>
+    request("/api/notes", {
+      method: "POST",
+      body: { text, author },
+      token,
+    }) as Promise<Note>,
+
+  updateNote: (token: string, id: string, patch: NotePatch) =>
+    request(`/api/notes/${id}`, { method: "PATCH", body: patch, token }) as Promise<Note>,
+
+  deleteNote: (token: string, id: string) =>
+    request(`/api/notes/${id}`, { method: "DELETE", token }),
+
+  // --- Чат между админами ---
+
+  chatMessages: (token: string, after?: string) =>
+    request(
+      `/api/chat/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`,
+      { token },
+    ) as Promise<ChatMessage[]>,
+
+  sendChatMessage: (token: string, text: string, sender: string) =>
+    request("/api/chat/messages", {
+      method: "POST",
+      body: { text, sender },
+      token,
+    }) as Promise<ChatMessage>,
 };
+
+export interface Note {
+  id: string;
+  text: string;
+  author: string;
+  /** "0" — не выполнено, "1" — выполнено. */
+  done: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NoteInput {
+  text: string;
+  author: string;
+}
+
+export type NotePatch = Partial<NoteInput> & { done?: string };
+
+const NOTES_CACHE_KEY = "notes_cache";
+
+/** Сохранить заметки в локальный кеш */
+export async function cacheNotes(notes: Note[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(NOTES_CACHE_KEY, JSON.stringify(notes));
+  } catch {
+    // кеш не критичен — молча пропускаем
+  }
+}
+
+/** Прочитать заметки из локального кеша (или []) */
+export async function getCachedNotes(): Promise<Note[]> {
+  try {
+    const raw = await AsyncStorage.getItem(NOTES_CACHE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as Note[];
+  } catch {
+    return [];
+  }
+}
+
+export interface ChatMessage {
+  id: string;
+  sender: string;
+  text: string;
+  createdAt: string;
+}
 
 export interface LeadCandidate {
   name: string;

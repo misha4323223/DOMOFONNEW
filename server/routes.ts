@@ -410,6 +410,86 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.status(201).json(lead);
   }));
 
+  // --- Заметки (только мобильное приложение) ---
+  // Общие с заявками правила: X-Admin-Token, никакого UI в веб-админке.
+  const NAME_MAX_LENGTH = 40;
+  const NOTE_TEXT_MAX_LENGTH = 4000;
+  const CHAT_TEXT_MAX_LENGTH = 2000;
+
+  function cleanName(value: unknown): string {
+    return typeof value === "string" && value.trim()
+      ? value.trim().slice(0, NAME_MAX_LENGTH)
+      : "Админ";
+  }
+
+  app.get("/api/notes", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
+    const notes = await storage.listNotes();
+    return res.json(notes);
+  }));
+
+  app.post("/api/notes", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+    if (!text) {
+      return res.status(400).json({ message: "Введите текст заметки" });
+    }
+    if (text.length > NOTE_TEXT_MAX_LENGTH) {
+      return res.status(400).json({ message: "Заметка слишком длинная" });
+    }
+    const note = await storage.createNote({ text, author: cleanName(req.body?.author) });
+    return res.status(201).json(note);
+  }));
+
+  app.patch("/api/notes/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const patch: Record<string, string> = {};
+    if (req.body?.text !== undefined) {
+      const text = typeof req.body.text === "string" ? req.body.text.trim() : "";
+      if (!text) {
+        return res.status(400).json({ message: "Текст заметки не может быть пустым" });
+      }
+      if (text.length > NOTE_TEXT_MAX_LENGTH) {
+        return res.status(400).json({ message: "Заметка слишком длинная" });
+      }
+      patch.text = text;
+    }
+    if (req.body?.done !== undefined) {
+      const done = req.body.done === "1" || req.body.done === true ? "1" : "0";
+      patch.done = done;
+    }
+    if (req.body?.author !== undefined) {
+      patch.author = cleanName(req.body.author);
+    }
+    const note = await storage.updateNote(req.params.id, patch);
+    return note ? res.json(note) : res.status(404).json({ message: "Заметка не найдена" });
+  }));
+
+  app.delete("/api/notes/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const deleted = await storage.deleteNote(req.params.id);
+    return deleted ? res.status(204).send() : res.status(404).json({ message: "Заметка не найдена" });
+  }));
+
+  // --- Чат между админами (только мобильное приложение) ---
+  // Получение: ?after=<ISO-дата> — вернуть только сообщения новее этой даты.
+  app.get("/api/chat/messages", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const after = typeof req.query.after === "string" ? req.query.after : undefined;
+    const messages = await storage.listChatMessages(after);
+    return res.json(messages);
+  }));
+
+  app.post("/api/chat/messages", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+    if (!text) {
+      return res.status(400).json({ message: "Введите текст сообщения" });
+    }
+    if (text.length > CHAT_TEXT_MAX_LENGTH) {
+      return res.status(400).json({ message: "Сообщение слишком длинное" });
+    }
+    const message = await storage.sendChatMessage({
+      sender: cleanName(req.body?.sender),
+      text,
+    });
+    return res.status(201).json(message);
+  }));
+
   const httpServer = createServer(app);
 
   return httpServer;

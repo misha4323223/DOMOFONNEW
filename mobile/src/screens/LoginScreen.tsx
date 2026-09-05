@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,23 +14,42 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { api } from "../api";
 import { colors } from "../theme";
 import { checkForUpdate, downloadAndRestart } from "../updates";
+import { getMyName, saveMyName } from "../profile";
 
 interface Props {
   onLogin: (token: string) => void;
 }
 
 export function LoginScreen({ onLogin }: Props) {
+  const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
+  // Подставляем имя с прошлого входа (Вариант А: имя живёт на телефоне)
+  useEffect(() => {
+    (async () => {
+      const saved = await getMyName();
+      if (saved) setName(saved);
+    })();
+  }, []);
+
   const submit = async () => {
-    if (!password.trim() || busy) return;
+    const trimmedName = name.trim();
+    if (!trimmedName || busy) {
+      if (!trimmedName) setError("Введите имя — оно подписывается под заметками и сообщениями");
+      return;
+    }
+    if (!password.trim()) {
+      setError("Введите пароль");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const res = await api.login(password.trim());
+      await saveMyName(trimmedName);
       onLogin(res.token);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось войти");
@@ -75,6 +94,17 @@ export function LoginScreen({ onLogin }: Props) {
         <View style={styles.card}>
           <Text style={styles.title}>Домофонная служба</Text>
           <Text style={styles.subtitle}>Админка</Text>
+
+          <TextInput
+            style={styles.input}
+            placeholder="Ваше имя (для заметок и чата)"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="words"
+            autoCorrect={false}
+            value={name}
+            onChangeText={setName}
+            returnKeyType="next"
+          />
 
           <TextInput
             style={styles.input}

@@ -12,7 +12,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import { api } from "../api";
+import { api, isNetworkError, isServerError } from "../api";
 import {
   cloneContent,
   DEFAULT_CONTENT,
@@ -20,6 +20,14 @@ import {
   sanitizeContent,
   type HomeContent,
 } from "../content";
+import {
+  cacheContent,
+  getCachedContent,
+  queueContentImageDelete,
+  queueContentImageUpload,
+  queueContentSave,
+  useSyncState,
+} from "../sync";
 import { colors } from "../theme";
 
 interface Props {
@@ -244,15 +252,25 @@ export function ContentScreen({ token, onBack }: Props) {
   const [saving, setSaving] = useState(false);
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Сколько изменений ждёт отправки (офлайн-очередь)
+  const { pending: pendingCount } = useSyncState();
 
   useEffect(() => {
     (async () => {
       try {
         const res = await api.getContent();
-        setDraft(sanitizeContent(res.content));
+        const clean = sanitizeContent(res.content);
+        setDraft(clean);
+        // Кешируем, чтобы офлайн открывался последний сохранённый вариант
+        await cacheContent(clean);
       } catch (e) {
-        // Продолжаем на дефолтных значениях — сайт читается и так
-        setLoadError(e instanceof Error ? e.message : "Не удалось загрузить контент");
+        // Нет связи — показываем последний сохранённый контент из кеша
+        const cached = await getCachedContent();
+        if (cached) {
+          setDraft(sanitizeContent(cached));
+        } else {
+          setLoadError(e instanceof Error ? e.message : "Не удалось загрузить контент");
+        }
       } finally {
         setLoading(false);
       }
@@ -342,9 +360,19 @@ export function ContentScreen({ token, onBack }: Props) {
     setSaving(true);
     try {
       await api.saveContent(token, draft);
+      await cacheContent(draft);
       Alert.alert("Сохранено", "Изменения опубликованы на сайте obzor71.ru");
     } catch (e) {
-      Alert.alert("Ошибка", e instanceof Error ? e.message : "Не удалось сохранить");
+      if (isNetworkError(e) || isServerError(e)) {
+        // Нет связи — правки кладём в очередь: отправятся автоматически
+        await queueContentSave(draft);
+        Alert.alert(
+          "Сохранено в очередь",
+          "Интернета нет — правки отправятся на сайт автоматически, когда появится связь",
+        );
+      } else {
+        Alert.alert("Ошибка", e instanceof Error ? e.message : "Не удалось сохранить");
+      }
     } finally {
       setSaving(false);
     }
@@ -397,9 +425,23 @@ export function ContentScreen({ token, onBack }: Props) {
         return;
       }
 
-      await api.uploadContentImage(token, imageKey, dataUrl);
-      patchSection("hero", { [imageKey]: `/api/content/image/${imageKey}` });
-      Alert.alert("Готово", "Фото загружено. Нажмите «Сохранить», чтобы применить на сайте.");
+      try {
+        await api.uploadContentImage(token, imageKey, dataUrl);
+        patchSection("hero", { [imageKey]: `/api/content/image/${imageKey}` });
+        Alert.alert("Готово", "Фото загружено. Нажмите «Сохранить», чтобы применить на сайте.");
+      } catch (e) {
+        if (isNetworkError(e) || isServerError(e)) {
+          // Нет связи — фото уйдёт на сервер само, когда появится интернет
+          await queueContentImageUpload(imageKey, dataUrl);
+          patchSection("hero", { [imageKey]: `/api/content/image/${imageKey}` });
+          Alert.alert(
+            "Сохранено в очередь",
+            "Интернета нет — фото отправится автоматически, когда появится связь",
+          );
+        } else {
+          Alert.alert("Ошибка", e instanceof Error ? e.message : "Не удалось загрузить фото");
+        }
+      }
     } catch (e) {
       Alert.alert("Ошибка", e instanceof Error ? e.message : "Не удалось загрузить фото");
     } finally {
@@ -418,7 +460,13 @@ export function ContentScreen({ token, onBack }: Props) {
             await api.deleteContentImage(token, imageKey);
             patchSection("hero", { [imageKey]: "" });
           } catch (e) {
-            Alert.alert("Ошибка", e instanceof Error ? e.message : "Не удалось удалить фото");
+            if (isNetworkError(e) || isServerError(e)) {
+              // Нет связи — удаление применится, когда появится интернет
+              await queueContentImageDelete(imageKey);
+              patchSection("hero", { [imageKey]: "" });
+            } else {
+              Alert.alert("Ошибка", e instanceof Error ? e.message : "Не удалось удалить фото");
+            }
           }
         },
       },
@@ -583,6 +631,15 @@ export function ContentScreen({ token, onBack }: Props) {
         <View style={{ width: 64 }} />
       </View>
 
+      {/* Плашка: изменения ждут интернета */}
+      {pendingCount > 0 && (
+        <View style={styles.offlineBanner}>
+          <Text style={styles.offlineBannerText}>
+            ⏳ {pendingCount} измен. ждут интернета — отправятся автоматически
+          </Text>
+        </View>
+      )}
+
       <View>
         <ScrollView
           horizontal
@@ -719,6 +776,19 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 17,
     fontWeight: "700",
+  },
+  offlineBanner: {
+    backgroundColor: "rgba(245,158,11,0.15)",
+    borderBottomWidth: 1,
+    borderBottomColor: "#f59e0b",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  offlineBannerText: {
+    color: "#fbbf24",
+    fontSize: 13,
+    fontWeight: "600",
+    textAlign: "center",
   },
   sectionTabs: {
     paddingHorizontal: 16,

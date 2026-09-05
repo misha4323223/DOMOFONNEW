@@ -9,6 +9,10 @@
     "runtimeVersion": {
       "policy": "fingerprint"
     },
+    "platforms": ["android", "ios"],
+    "fingerprint": {
+      "ignorePaths": ["android", "ios"]
+    },
     "updates": {
       "url": "https://u.expo.dev/01a13674-a633-47ca-ae30-865da95251c1",
       "checkAutomatically": "NEVER"

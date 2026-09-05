@@ -10,7 +10,16 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { api, SERVICES, type LeadCandidate } from "../api";
+import {
+  api,
+  SERVICES,
+  isNetworkError,
+  isServerError,
+  type Lead,
+  type LeadCandidate,
+  type LeadInput,
+} from "../api";
+import { queueLeadCreate } from "../sync";
 import { colors } from "../theme";
 
 interface Props {
@@ -40,17 +49,47 @@ export function ReviewScreen({ token, candidates, fullText, onDone, onBack }: Pr
     const selected = items.filter((it) => it.include);
     if (selected.length === 0) return;
     setBusy(true);
+    let createdOnline = 0;
+    let queued = 0;
     try {
       for (const it of selected) {
-        await api.createLead(token, {
+        const body: LeadInput = {
           name: it.name.trim() || "Без имени",
           phone: it.phone.trim(),
           service: it.service ?? "consult",
           address: it.address.trim(),
           comment: it.comment.trim() || null,
-        });
+        };
+        try {
+          await api.createLead(token, body);
+          createdOnline++;
+        } catch (e) {
+          if (isNetworkError(e) || isServerError(e)) {
+            // Нет связи — заявки кладём в очередь, отправятся автоматически
+            const clientId = `local-${Date.now()}-${Math.random()
+              .toString(36)
+              .slice(2, 8)}`;
+            const full: Lead = {
+              id: clientId,
+              ...body,
+              status: "new",
+              createdAt: new Date().toISOString(),
+            };
+            await queueLeadCreate(clientId, body, full);
+            queued++;
+          } else {
+            throw e;
+          }
+        }
       }
-      Alert.alert("Готово", `Создано заявок: ${selected.length}`);
+      if (queued > 0) {
+        Alert.alert(
+          "Готово",
+          `Создано заявок: ${createdOnline}, в очереди: ${queued} — отправятся при появлении интернета`,
+        );
+      } else {
+        Alert.alert("Готово", `Создано заявок: ${createdOnline}`);
+      }
       onDone();
     } catch (e) {
       Alert.alert("Ошибка", e instanceof Error ? e.message : "Не удалось создать заявки");

@@ -15,10 +15,13 @@ import {
   api,
   SERVICES,
   LEAD_STATUSES,
+  isNetworkError,
+  isServerError,
   type Lead,
   type LeadInput,
   type LeadStatus,
 } from "../api";
+import { queueLeadCreate, queueLeadUpdate } from "../sync";
 import { colors } from "../theme";
 
 interface Props {
@@ -60,7 +63,27 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
       }
       onSaved();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Не удалось сохранить");
+      if (isNetworkError(e) || isServerError(e)) {
+        // Нет связи — сохраняем офлайн: изменение отправится само,
+        // когда интернет появится.
+        if (lead) {
+          await queueLeadUpdate(lead.id, { ...body, status });
+        } else {
+          const clientId = `local-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`;
+          const full: Lead = {
+            id: clientId,
+            ...body,
+            status: "new",
+            createdAt: new Date().toISOString(),
+          };
+          await queueLeadCreate(clientId, body, full);
+        }
+        onSaved();
+      } else {
+        setError(e instanceof Error ? e.message : "Не удалось сохранить");
+      }
     } finally {
       setBusy(false);
     }

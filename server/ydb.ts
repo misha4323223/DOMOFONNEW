@@ -279,3 +279,206 @@ export async function deleteYdbSetting(key: string): Promise<void> {
     Key: { key: { S: key } },
   });
 }
+
+// --- Заметки (мобильное приложение, таблица notes) ---
+
+const NOTES_TABLE = "notes";
+
+let notesTableReady: Promise<void> | undefined;
+
+async function ensureNotesTable(): Promise<void> {
+  if (!notesTableReady) {
+    notesTableReady = (async () => {
+      try {
+        await docApi("CreateTable", {
+          TableName: NOTES_TABLE,
+          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
+          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Таблица уже существует — это нормально
+        if (!message.includes("ResourceInUseException")) {
+          throw error;
+        }
+      }
+    })();
+  }
+  await notesTableReady;
+}
+
+export interface Note {
+  id: string;
+  text: string;
+  author: string;
+  /** "0" — не выполнено, "1" — выполнено (в YDB храним строкой, как остальные поля). */
+  done: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NoteInput {
+  text: string;
+  author: string;
+}
+
+export type NotePatch = Partial<NoteInput> & { done?: string };
+
+function toNoteItem(note: Note): Record<string, unknown> {
+  const item: Record<string, unknown> = {
+    id: { S: note.id },
+    text: { S: note.text },
+    author: { S: note.author },
+    done: { S: note.done ?? "0" },
+    createdAt: { S: note.createdAt },
+    updatedAt: { S: note.updatedAt },
+  };
+  return item;
+}
+
+function fromNoteItem(
+  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
+): Note {
+  return {
+    id: item.id?.S ?? "",
+    text: item.text?.S ?? "",
+    author: item.author?.S ?? "",
+    done: item.done?.S === "1" ? "1" : "0",
+    createdAt: item.createdAt?.S ?? "",
+    updatedAt: item.updatedAt?.S ?? "",
+  };
+}
+
+export async function createYdbNote(input: NoteInput): Promise<Note> {
+  await ensureNotesTable();
+  const now = new Date().toISOString();
+  const note: Note = {
+    id: randomUUID(),
+    text: input.text,
+    author: input.author,
+    done: "0",
+    createdAt: now,
+    updatedAt: now,
+  };
+  await docApi("PutItem", { TableName: NOTES_TABLE, Item: toNoteItem(note) });
+  return note;
+}
+
+export async function listYdbNotes(): Promise<Note[]> {
+  await ensureNotesTable();
+  const result = (await docApi("Scan", { TableName: NOTES_TABLE })) as
+    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
+    | undefined;
+  return (result?.Items ?? [])
+    .map((item) => fromNoteItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function updateYdbNote(
+  id: string,
+  patch: NotePatch,
+): Promise<Note | undefined> {
+  const notes = await listYdbNotes();
+  const current = notes.find((note) => note.id === id);
+  if (!current) return undefined;
+  const updated: Note = {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  await docApi("PutItem", { TableName: NOTES_TABLE, Item: toNoteItem(updated) });
+  return updated;
+}
+
+export async function deleteYdbNote(id: string): Promise<boolean> {
+  await ensureNotesTable();
+  await docApi("DeleteItem", { TableName: NOTES_TABLE, Key: { id: { S: id } } });
+  return true;
+}
+
+// --- Чат между админами (мобильное приложение, таблица chat_messages) ---
+
+const CHAT_TABLE = "chat_messages";
+
+let chatTableReady: Promise<void> | undefined;
+
+async function ensureChatTable(): Promise<void> {
+  if (!chatTableReady) {
+    chatTableReady = (async () => {
+      try {
+        await docApi("CreateTable", {
+          TableName: CHAT_TABLE,
+          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
+          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Таблица уже существует — это нормально
+        if (!message.includes("ResourceInUseException")) {
+          throw error;
+        }
+      }
+    })();
+  }
+  await chatTableReady;
+}
+
+export interface ChatMessage {
+  id: string;
+  sender: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface ChatMessageInput {
+  sender: string;
+  text: string;
+}
+
+function toChatItem(message: ChatMessage): Record<string, unknown> {
+  return {
+    id: { S: message.id },
+    sender: { S: message.sender },
+    text: { S: message.text },
+    createdAt: { S: message.createdAt },
+  };
+}
+
+function fromChatItem(
+  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
+): ChatMessage {
+  return {
+    id: item.id?.S ?? "",
+    sender: item.sender?.S ?? "",
+    text: item.text?.S ?? "",
+    createdAt: item.createdAt?.S ?? "",
+  };
+}
+
+export async function sendYdbChatMessage(input: ChatMessageInput): Promise<ChatMessage> {
+  await ensureChatTable();
+  const message: ChatMessage = {
+    id: randomUUID(),
+    sender: input.sender,
+    text: input.text,
+    createdAt: new Date().toISOString(),
+  };
+  await docApi("PutItem", { TableName: CHAT_TABLE, Item: toChatItem(message) });
+  return message;
+}
+
+export async function listYdbChatMessages(
+  after?: string,
+  limit = 200,
+): Promise<ChatMessage[]> {
+  await ensureChatTable();
+  const result = (await docApi("Scan", { TableName: CHAT_TABLE })) as
+    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
+    | undefined;
+  const all = (result?.Items ?? [])
+    .map((item) => fromChatItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const filtered = after ? all.filter((m) => m.createdAt > after) : all;
+  // Возвращаем последние `limit` сообщений (по возрастанию времени).
+  return filtered.length > limit ? filtered.slice(filtered.length - limit) : filtered;
+}

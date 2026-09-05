@@ -11,7 +11,10 @@ import { LeadFormScreen } from "./src/screens/LeadFormScreen";
 import { ScanScreen } from "./src/screens/ScanScreen";
 import { ReviewScreen } from "./src/screens/ReviewScreen";
 import { ContentScreen } from "./src/screens/ContentScreen";
+import { NotesScreen } from "./src/screens/NotesScreen";
+import { ChatScreen } from "./src/screens/ChatScreen";
 import { api, type Lead, type LeadCandidate } from "./src/api";
+import { flushPending } from "./src/sync";
 import { colors } from "./src/theme";
 
 const TOKEN_KEY = "admin_token";
@@ -31,7 +34,9 @@ type Screen =
   | { name: "form"; lead: Lead | null }
   | { name: "scan" }
   | { name: "review"; candidates: LeadCandidate[]; fullText: string }
-  | { name: "content" };
+  | { name: "content" }
+  | { name: "notes" }
+  | { name: "chat" };
 
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -77,6 +82,21 @@ export default function App() {
     });
     return () => sub.remove();
   }, []);
+
+  // Офлайн-очередь: отправляем накопленные изменения при входе, при возврате
+  // приложения на передний план и каждые 20 секунд — пока есть токен.
+  useEffect(() => {
+    if (!token) return;
+    flushPending(token);
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") flushPending(token);
+    });
+    const interval = setInterval(() => flushPending(token), 20_000);
+    return () => {
+      sub.remove();
+      clearInterval(interval);
+    };
+  }, [token]);
 
   const handleLogin = async (newToken: string) => {
     await AsyncStorage.setItem(TOKEN_KEY, newToken);
@@ -140,6 +160,20 @@ export default function App() {
         <ContentScreen token={token} onBack={() => setScreen({ name: "leads" })} />
       </View>
     );
+  } else if (screen.name === "notes") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <NotesScreen token={token} onBack={() => setScreen({ name: "leads" })} />
+      </View>
+    );
+  } else if (screen.name === "chat") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <ChatScreen token={token} onBack={() => setScreen({ name: "leads" })} />
+      </View>
+    );
   } else if (screen.name === "review") {
     content = (
       <View style={styles.root}>
@@ -168,6 +202,8 @@ export default function App() {
           onEdit={(lead) => setScreen({ name: "form", lead })}
           onScan={() => setScreen({ name: "scan" })}
           onContent={() => setScreen({ name: "content" })}
+          onNotes={() => setScreen({ name: "notes" })}
+          onChat={() => setScreen({ name: "chat" })}
         />
       </View>
     );
