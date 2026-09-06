@@ -62,7 +62,7 @@ export function statusLabel(value: LeadStatus | undefined): string {
 
 export const SERVICES: { value: string; label: string }[] = [
   { value: "install", label: "Установка домофона" },
-  { value: "repair", label: "Ремонт / не работает" },
+  { value: "repair", label: "Обслуживание / не работает" },
   { value: "maintenance", label: "Обслуживание" },
   { value: "consult", label: "Консультация" },
 ];
@@ -212,16 +212,35 @@ export const api = {
   deleteNote: (token: string, id: string) =>
     request(`/api/notes/${id}`, { method: "DELETE", token }),
 
+  // --- Отзывы клиентов (модерация) ---
+
+  /** Все отзывы (включая ожидающие модерации) — только для админа. */
+  reviews: (token: string) =>
+    request("/api/admin/reviews", { token }) as Promise<Review[]>,
+
+  /** Сменить статус отзыва: "new" → "published" / "hidden". */
+  updateReview: (token: string, id: string, status: ReviewStatus) =>
+    request(`/api/admin/reviews/${id}`, {
+      method: "PATCH",
+      body: { status },
+      token,
+    }) as Promise<Review>,
+
+  deleteReview: (token: string, id: string) =>
+    request(`/api/admin/reviews/${id}`, { method: "DELETE", token }) as Promise<{
+      ok: boolean;
+    }>,
+
   // --- Чат между админами ---
 
   chatMessages: (token: string, after?: string) =>
     request(
       `/api/chat/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`,
       { token },
-    ) as Promise<ChatMessage[]>,  sendChatMessage: (token: string, text: string, sender: string, address: string) =>
+    ) as Promise<ChatMessage[]>,  sendChatMessage: (token: string, text: string, sender: string) =>
     request("/api/chat/messages", {
       method: "POST",
-      body: { text, sender, address },
+      body: { text, sender },
       token,
     }) as Promise<ChatMessage>,
 
@@ -238,6 +257,37 @@ export const api = {
       token,
     }) as Promise<{ ok: boolean }>,
   };
+
+// --- Отзывы клиентов (модерация) ---
+
+export type ReviewStatus = "new" | "published" | "hidden";
+
+export interface Review {
+  id: string;
+  /** Имя автора (как он представился). */
+  name: string;
+  /** Город — необязательное поле. */
+  city: string;
+  /** Оценка от 1 до 5 (строкой, как в YDB). */
+  rating: string;
+  /** Текст отзыва. */
+  text: string;
+  status: ReviewStatus;
+  createdAt: string;
+}
+
+export const REVIEW_STATUSES: { value: ReviewStatus; label: string }[] = [
+  { value: "new", label: "На модерации" },
+  { value: "published", label: "Опубликован" },
+  { value: "hidden", label: "Скрыт" },
+];
+
+export function reviewStatusLabel(value: ReviewStatus | undefined): string {
+  return (
+    REVIEW_STATUSES.find((s) => s.value === (value ?? "new"))?.label ??
+    "На модерации"
+  );
+}
 
 export interface Note {
   id: string;
@@ -281,7 +331,6 @@ export async function getCachedNotes(): Promise<Note[]> {
 export interface ChatMessage {
   id: string;
   sender: string;
-  address: string;
   text: string;
   createdAt: string;
   editedAt?: string;

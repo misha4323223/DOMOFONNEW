@@ -2,4 +2,7 @@ User-agent: *
 Allow: /
 Disallow: /admin
 
+# Основное зеркало сайта (директива Яндекса)
+Host: obzor71.ru
+
 Sitemap: https://obzor71.ru/sitemap.xml

@@ -41,6 +41,7 @@ interface Props {
   onContent: () => void;
   onNotes: () => void;
   onChat: () => void;
+  onReviews: () => void;
 }
 
 function formatDate(iso: string): string {
@@ -92,6 +93,7 @@ export function LeadsScreen({
   onContent,
   onNotes,
   onChat,
+  onReviews,
 }: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -321,6 +323,9 @@ export function LeadsScreen({
           </Pressable>
           <Pressable onPress={onScan} hitSlop={12} style={styles.scanButton}>
             <Text style={styles.scanButtonText}>📷 Блокнот</Text>
+          </Pressable>
+          <Pressable onPress={onReviews} hitSlop={12} style={styles.scanButton}>
+            <Text style={styles.scanButtonText}>⭐ Отзывы</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [

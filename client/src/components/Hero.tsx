@@ -5,10 +5,12 @@ import heroMobile from "../../image/hero-mobile.webp";
 
 interface HeroProps {
   content: HeroContent;
+  /** Название бренда (Обзор71) — подставляется в скрытый заголовок для поисковиков. */
+  brandName?: string;
   onRequestClick: () => void;
 }
 
-export function Hero({ content, onRequestClick }: HeroProps) {
+export function Hero({ content, brandName, onRequestClick }: HeroProps) {
   const scrollToServices = () =>
     document.querySelector("#services")?.scrollIntoView({ behavior: "smooth" });
 
@@ -19,6 +21,11 @@ export function Hero({ content, onRequestClick }: HeroProps) {
 
   return (
     <section>
+      {/* Скрытый заголовок для поисковиков: текст поверх фото убран по просьбе
+          владельца, но ключевые слова должны остаться в HTML для Яндекса. */}
+      <h1 className="sr-only">
+        {brandName || "Обзор71"} — установка и обслуживание домофонов
+      </h1>
       <div className="relative h-[85vh] min-h-[560px] overflow-hidden">
         <picture className="absolute inset-0">
           <source media="(max-width: 767px)" srcSet={mobileSrc} />

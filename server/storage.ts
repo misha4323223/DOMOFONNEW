@@ -16,12 +16,20 @@ import {
   listYdbChatMessages,
   updateYdbChatMessage,
   deleteYdbChatMessage,
+  createYdbReview,
+  listYdbReviews,
+  listYdbPublishedReviews,
+  updateYdbReview,
+  deleteYdbReview,
   type StoredSetting,
   type Note,
   type NoteInput,
   type NotePatch,
   type ChatMessage,
   type ChatMessageInput,
+  type Review,
+  type ReviewInput,
+  type ReviewStatus,
 } from "./ydb";
 
 export interface IStorage {
@@ -45,6 +53,12 @@ export interface IStorage {
   listChatMessages(after?: string): Promise<ChatMessage[]>;
   updateChatMessage(id: string, patch: { text?: string }): Promise<ChatMessage | undefined>;
   deleteChatMessage(id: string): Promise<boolean>;
+  // Отзывы клиентов (сайт + админка).
+  createReview(review: ReviewInput): Promise<Review>;
+  listReviews(): Promise<Review[]>;
+  listPublishedReviews(): Promise<Review[]>;
+  updateReview(id: string, patch: { status?: ReviewStatus }): Promise<Review | undefined>;
+  deleteReview(id: string): Promise<boolean>;
 }
 
 export class MemStorage implements IStorage {
@@ -53,6 +67,7 @@ export class MemStorage implements IStorage {
   private settings = new Map<string, StoredSetting>();
   private notes = new Map<string, Note>();
   private chat = new Map<string, ChatMessage>();
+  private reviews = new Map<string, Review>();
   private useYdb = Boolean(process.env.YDB_DATABASE_PATH);
 
   async getUser(id: string): Promise<User | undefined> {
@@ -200,6 +215,53 @@ export class MemStorage implements IStorage {
   async deleteChatMessage(id: string): Promise<boolean> {
     if (this.useYdb) return deleteYdbChatMessage(id);
     return this.chat.delete(id);
+  }
+
+  async createReview(input: ReviewInput): Promise<Review> {
+    if (this.useYdb) return createYdbReview(input);
+    const review: Review = {
+      id: randomUUID(),
+      name: input.name,
+      city: input.city ?? "",
+      rating: input.rating,
+      text: input.text,
+      status: "new",
+      createdAt: new Date().toISOString(),
+    };
+    this.reviews.set(review.id, review);
+    return review;
+  }
+
+  async listReviews(): Promise<Review[]> {
+    if (this.useYdb) return listYdbReviews();
+    return Array.from(this.reviews.values()).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    );
+  }
+
+  async listPublishedReviews(): Promise<Review[]> {
+    if (this.useYdb) return listYdbPublishedReviews();
+    return (await this.listReviews()).filter((r) => r.status === "published");
+  }
+
+  async updateReview(
+    id: string,
+    patch: { status?: ReviewStatus },
+  ): Promise<Review | undefined> {
+    if (this.useYdb) return updateYdbReview(id, patch);
+    const current = this.reviews.get(id);
+    if (!current) return undefined;
+    const updated: Review = {
+      ...current,
+      status: patch.status ?? current.status,
+    };
+    this.reviews.set(id, updated);
+    return updated;
+  }
+
+  async deleteReview(id: string): Promise<boolean> {
+    if (this.useYdb) return deleteYdbReview(id);
+    return this.reviews.delete(id);
   }
 }
 

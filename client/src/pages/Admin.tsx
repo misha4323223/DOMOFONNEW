@@ -20,12 +20,36 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { ContentEditor } from "@/components/ContentEditor";
-import { Home, Inbox, LayoutTemplate, Loader2, Lock, LogOut, RefreshCw } from "lucide-react";
+import {
+  Check,
+  EyeOff,
+  Home,
+  Inbox,
+  LayoutTemplate,
+  Loader2,
+  Lock,
+  LogOut,
+  MessageSquareQuote,
+  RefreshCw,
+  Star,
+  Trash2,
+} from "lucide-react";
 import type { Lead, LeadStatus } from "@shared/schema";
+
+/** Отзыв клиента — модель из API (совпадает с server/ydb.ts). */
+interface SiteReview {
+  id: string;
+  name: string;
+  city: string;
+  rating: string;
+  text: string;
+  status: "new" | "published" | "hidden";
+  createdAt: string;
+}
 
 const SERVICE_LABELS: Record<string, string> = {
   install: "Установка домофона",
-  repair: "Ремонт / не работает",
+  repair: "Обслуживание / не работает",
   maintenance: "Обслуживание",
   consult: "Консультация",
 };
@@ -36,7 +60,7 @@ const STATUS_OPTIONS: { value: LeadStatus; label: string }[] = [
   { value: "done", label: "Выполнена" },
 ];
 
-type AdminTab = "leads" | "site";
+type AdminTab = "leads" | "reviews" | "site";
 
 function StatusChips({
   lead,
@@ -319,6 +343,206 @@ function LeadsBoard() {
   );
 }
 
+function ReviewStars({ rating }: { rating: number }) {
+  return (
+    <span className="inline-flex items-center gap-0.5" aria-label={`Оценка ${rating} из 5`}>
+      {Array.from({ length: 5 }).map((_, i) => (
+        <Star
+          key={i}
+          className={`h-3.5 w-3.5 ${
+            i < rating ? "fill-amber-400 text-amber-400" : "text-muted-foreground/25"
+          }`}
+        />
+      ))}
+    </span>
+  );
+}
+
+const REVIEW_STATUS_LABELS: Record<SiteReview["status"], string> = {
+  new: "На модерации",
+  published: "Опубликован",
+  hidden: "Скрыт",
+};
+
+function ReviewsBoard() {
+  const [reviews, setReviews] = useState<SiteReview[] | null>(null);
+  const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiRequest("GET", "/api/admin/reviews");
+      setReviews((await res.json()) as SiteReview[]);
+      setError("");
+    } catch {
+      setError("Не удалось загрузить отзывы");
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    // Автообновление, чтобы новые отзывы с сайта появлялись сами
+    const interval = setInterval(load, 20000);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const setStatus = async (review: SiteReview, status: SiteReview["status"]) => {
+    if (busyId) return;
+    setBusyId(review.id);
+    try {
+      await apiRequest("PATCH", `/api/admin/reviews/${review.id}`, { status });
+      setReviews((prev) =>
+        prev ? prev.map((r) => (r.id === review.id ? { ...r, status } : r)) : prev,
+      );
+      setError("");
+    } catch {
+      setError("Не удалось обновить статус отзыва");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remove = async (review: SiteReview) => {
+    if (busyId) return;
+    if (!window.confirm("Удалить отзыв безвозвратно?")) return;
+    setBusyId(review.id);
+    try {
+      await apiRequest("DELETE", `/api/admin/reviews/${review.id}`);
+      setReviews((prev) => (prev ? prev.filter((r) => r.id !== review.id) : prev));
+      setError("");
+    } catch {
+      setError("Не удалось удалить отзыв");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const pending = reviews?.filter((r) => r.status === "new").length ?? 0;
+
+  return (
+    <main className="mx-auto max-w-6xl px-6 py-8">
+      <div className="flex items-center justify-between gap-4 mb-6">
+        <div>
+          <h2 className="text-2xl font-bold">Отзывы клиентов</h2>
+          <p className="text-sm text-muted-foreground">
+            {reviews ? `${reviews.length} всего` : "Загрузка…"}
+            {pending > 0 && (
+              <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
+                {pending} ждут проверки
+              </span>
+            )}
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={load}>
+          <RefreshCw className="mr-1.5 h-4 w-4" /> Обновить
+        </Button>
+      </div>
+
+      {error && (
+        <div className="mb-6 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      {reviews === null ? (
+        <div className="flex items-center justify-center gap-3 py-16 text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin" /> Загружаем отзывы…
+        </div>
+      ) : reviews.length === 0 ? (
+        <Card>
+          <CardContent className="py-16 text-center">
+            <MessageSquareQuote className="mx-auto mb-4 h-10 w-10 text-muted-foreground/50" />
+            <p className="text-muted-foreground">Отзывов пока нет</p>
+            <p className="mt-1 text-sm text-muted-foreground/70">
+              Клиенты оставляют их прямо на сайте — в блоке «Отзывы»
+            </p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {reviews.map((review) => (
+            <Card key={review.id}>
+              <CardContent className="pt-5">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+                  <div className="flex items-center gap-3">
+                    <span className="font-semibold">{review.name}</span>
+                    {review.city && (
+                      <span className="text-sm text-muted-foreground">
+                        {review.city}
+                      </span>
+                    )}
+                    <ReviewStars rating={Number(review.rating) || 0} />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge
+                      variant="secondary"
+                      className={
+                        review.status === "published"
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          : review.status === "new"
+                            ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                            : ""
+                      }
+                    >
+                      {REVIEW_STATUS_LABELS[review.status]}
+                    </Badge>
+                    {busyId === review.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    ) : (
+                      <>
+                        {review.status !== "published" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => setStatus(review, "published")}
+                            title="Опубликовать на сайте"
+                          >
+                            <Check className="mr-1 h-3.5 w-3.5" />
+                            Опубликовать
+                          </Button>
+                        )}
+                        {review.status !== "hidden" && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs text-muted-foreground"
+                            onClick={() => setStatus(review, "hidden")}
+                            title="Скрыть с сайта"
+                          >
+                            <EyeOff className="mr-1 h-3.5 w-3.5" />
+                            Скрыть
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-destructive"
+                          onClick={() => remove(review)}
+                          title="Удалить навсегда"
+                        >
+                          <Trash2 className="mr-1 h-3.5 w-3.5" />
+                          Удалить
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  {review.text}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground/70">
+                  {formatDate(review.createdAt)}
+                </p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
+
 function TabButton({
   active,
   onClick,
@@ -347,9 +571,10 @@ function TabButton({
 }
 
 function AdminWorkspace() {
-  const [tab, setTab] = useState<AdminTab>(
-    () => (localStorage.getItem("admin-tab") === "site" ? "site" : "leads"),
-  );
+  const [tab, setTab] = useState<AdminTab>(() => {
+    const saved = localStorage.getItem("admin-tab");
+    return saved === "site" || saved === "reviews" ? saved : "leads";
+  });
 
   const switchTab = (next: AdminTab) => {
     setTab(next);
@@ -389,6 +614,13 @@ function AdminWorkspace() {
                 Заявки
               </TabButton>
               <TabButton
+                active={tab === "reviews"}
+                onClick={() => switchTab("reviews")}
+                icon={<MessageSquareQuote className="h-4 w-4" />}
+              >
+                Отзывы
+              </TabButton>
+              <TabButton
                 active={tab === "site"}
                 onClick={() => switchTab("site")}
                 icon={<LayoutTemplate className="h-4 w-4" />}
@@ -412,7 +644,13 @@ function AdminWorkspace() {
         </div>
       </header>
 
-      {tab === "leads" ? <LeadsBoard /> : <ContentEditor />}
+      {tab === "leads" ? (
+        <LeadsBoard />
+      ) : tab === "reviews" ? (
+        <ReviewsBoard />
+      ) : (
+        <ContentEditor />
+      )}
     </div>
   );
 }

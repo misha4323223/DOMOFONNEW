@@ -4,7 +4,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { insertLeadSchema, type Lead } from "@shared/schema";
 import { SERVICE_LABELS } from "@shared/services";
-import { notifyNewLead } from "./push";
+import { notifyNewLead, notifyNewReview } from "./push";
 import { saveDeviceToken, removeDeviceToken } from "./ydb";
 import { recognizeHandwritten } from "./vision";
 import { parseCandidates } from "./parse";
@@ -505,6 +505,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.delete("/api/chat/messages/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
     await storage.deleteChatMessage(req.params.id);
+    return res.json({ ok: true });
+  }));
+
+  // --- Отзывы клиентов ---
+  // Публичная отправка отзыва с сайта: без авторизации, но с проверками.
+  // Отзыв попадает в статус "new" — админ публикует его в админке.
+  const REVIEW_NAME_MAX_LENGTH = 60;
+  const REVIEW_CITY_MAX_LENGTH = 60;
+  const REVIEW_TEXT_MAX_LENGTH = 2000;
+
+  app.post("/api/reviews", asyncHandler(async (req: Request, res: Response) => {
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    const city = typeof req.body?.city === "string" ? req.body.city.trim() : "";
+    const ratingRaw = typeof req.body?.rating === "string" ? req.body.rating.trim() : "";
+    const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+
+    if (!name) {
+      return res.status(400).json({ message: "Укажите имя" });
+    }
+    if (name.length > REVIEW_NAME_MAX_LENGTH) {
+      return res.status(400).json({ message: "Имя слишком длинное" });
+    }
+    if (city.length > REVIEW_CITY_MAX_LENGTH) {
+      return res.status(400).json({ message: "Город слишком длинный" });
+    }
+    const rating = Number(ratingRaw);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: "Оценка должна быть от 1 до 5" });
+    }
+    if (!text) {
+      return res.status(400).json({ message: "Напишите текст отзыва" });
+    }
+    if (text.length > REVIEW_TEXT_MAX_LENGTH) {
+      return res.status(400).json({ message: "Отзыв слишком длинный" });
+    }
+
+    const review = await storage.createReview({
+      name,
+      city,
+      rating: String(rating),
+      text,
+    });
+
+    // Уведомить админа push'ем — отзыв ждёт модерации (пожаробезопасно:
+    // ошибка push не ломает ответ клиенту)
+    await notifyNewReview(review).catch((err) =>
+      console.error("Ошибка отправки push об отзыве:", err),
+    );
+    return res.status(201).json(review);
+  }));
+
+  // Опубликованные отзывы — читает сайт (без авторизации)
+  app.get("/api/reviews", asyncHandler(async (_req: Request, res: Response) => {
+    const reviews = await storage.listPublishedReviews();
+    res.set("Cache-Control", "public, max-age=60");
+    return res.json(reviews);
+  }));
+
+  // Все отзывы (включая на модерации) — только для админа
+  app.get("/api/admin/reviews", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
+    const reviews = await storage.listReviews();
+    return res.json(reviews);
+  }));
+
+  // Смена статуса отзыва админом: "new" → "published" / "hidden"
+  app.patch("/api/admin/reviews/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const status = req.body?.status;
+    if (status !== "new" && status !== "published" && status !== "hidden") {
+      return res.status(400).json({ message: "Некорректный статус" });
+    }
+    const review = await storage.updateReview(req.params.id, { status });
+    if (!review) {
+      return res.status(404).json({ message: "Отзыв не найден" });
+    }
+    return res.json(review);
+  }));
+
+  app.delete("/api/admin/reviews/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    await storage.deleteReview(req.params.id);
     return res.json({ ok: true });
   }));
 

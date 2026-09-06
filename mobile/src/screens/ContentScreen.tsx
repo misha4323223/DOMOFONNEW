@@ -127,6 +127,18 @@ const FIELDS: Record<string, FieldDef[]> = {
       ],
     },
   ],
+  reviews: [
+    { type: "text", key: "title", label: "Заголовок блока" },
+    { type: "text", key: "formTitle", label: "Заголовок формы «Оставить отзыв»" },
+    { type: "text", key: "ratingLabel", label: "Подпись над выбором оценки" },
+    { type: "text", key: "namePlaceholder", label: "Подсказка в поле «Имя»" },
+    { type: "text", key: "textPlaceholder", label: "Подсказка в поле «Текст отзыва»", multiline: true },
+    { type: "text", key: "submitLabel", label: "Кнопка «Отправить отзыв»" },
+    { type: "text", key: "submittingLabel", label: "Кнопка во время отправки" },
+    { type: "text", key: "successTitle", label: "Заголовок «Спасибо за отзыв»" },
+    { type: "text", key: "successText", label: "Текст после отправки", multiline: true },
+    { type: "text", key: "moderationNote", label: "Подпись про модерацию", multiline: true },
+  ],
   coverage: [
     { type: "enum", key: "mode", label: "Как показывать блок о городах", options: COVERAGE_OPTIONS },
     { type: "text", key: "title", label: "Заголовок блока", multiline: true },

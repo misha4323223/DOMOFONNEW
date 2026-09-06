@@ -26,9 +26,10 @@ export function Header({ content, onRequestClick }: HeaderProps) {
         <div className="flex items-center justify-between h-16">
           <div className="flex items-center gap-2">
             <div className="leading-tight">
-              <h1 className="text-lg font-bold" data-testid="text-header-logo">
+              {/* Логотип — не H1: единственный H1 страницы живёт в первом экране */}
+              <p className="text-lg font-bold" data-testid="text-header-logo">
                 {content.logoTitle}
-              </h1>
+              </p>
               {content.logoSubtitle && (
                 <p className="text-xs text-muted-foreground" data-testid="text-header-legal">
                   {content.logoSubtitle}

@@ -14,33 +14,30 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { api } from "../api";
 import { colors } from "../theme";
 import { checkForUpdate, downloadAndRestart } from "../updates";
-import { getMyProfile, saveMyProfile } from "../profile";
+import { getMyName, saveMyName } from "../profile";
 
 interface Props {
   onLogin: (token: string) => void;
 }
 
 export function LoginScreen({ onLogin }: Props) {
-  const [city, setCity] = useState("");
-  const [address, setAddress] = useState("");
+  const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
-  // Подставляем профиль с прошлого входа
   useEffect(() => {
     (async () => {
-      const saved = await getMyProfile();
-      if (saved.city) setCity(saved.city);
-      if (saved.address) setAddress(saved.address);
+      const saved = await getMyName();
+      if (saved) setName(saved);
     })();
   }, []);
 
   const submit = async () => {
-    const trimmedCity = city.trim();
-    if (!trimmedCity || busy) {
-      if (!trimmedCity) setError("Введите город — он подписывается под сообщениями");
+    const trimmedName = name.trim();
+    if (!trimmedName || busy) {
+      if (!trimmedName) setError("Введите имя — оно подписывается под заметками и сообщениями");
       return;
     }
     if (!password.trim()) {
@@ -51,7 +48,7 @@ export function LoginScreen({ onLogin }: Props) {
     setError(null);
     try {
       const res = await api.login(password.trim());
-      await saveMyProfile({ city: trimmedCity, address: address.trim() });
+      await saveMyName(trimmedName);
       onLogin(res.token);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось войти");
@@ -98,23 +95,12 @@ export function LoginScreen({ onLogin }: Props) {
 
           <TextInput
             style={styles.input}
-            placeholder="Город"
+            placeholder="Ваше имя"
             placeholderTextColor={colors.textMuted}
             autoCapitalize="words"
             autoCorrect={false}
-            value={city}
-            onChangeText={setCity}
-            returnKeyType="next"
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Улица, дом, подъезд"
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="words"
-            autoCorrect={false}
-            value={address}
-            onChangeText={setAddress}
+            value={name}
+            onChangeText={setName}
             returnKeyType="next"
           />
 

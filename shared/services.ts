@@ -1,6 +1,6 @@
 export const SERVICE_LABELS: Record<string, string> = {
   install: "Установка домофона",
-  repair: "Ремонт / не работает",
+  repair: "Обслуживание / не работает",
   maintenance: "Обслуживание",
   consult: "Консультация",
 };

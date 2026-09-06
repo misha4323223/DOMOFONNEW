@@ -34,8 +34,20 @@ export async function saveMyProfile(profile: UserProfile): Promise<void> {
   }
 }
 
-/** Обратная совместимость: вернуть город как «имя». */
+/** Сохранить имя (для заметок и чата). */
+export async function saveMyName(name: string): Promise<void> {
+  try {
+    await AsyncStorage.setItem("user_name", name.trim());
+  } catch {
+    // не критично
+  }
+}
+
+/** Обратная совместимость: вернуть имя. */
 export async function getMyName(): Promise<string> {
-  const p = await getMyProfile();
-  return p.city;
+  try {
+    return (await AsyncStorage.getItem("user_name")) ?? "";
+  } catch {
+    return "";
+  }
 }

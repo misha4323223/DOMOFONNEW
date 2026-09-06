@@ -24,7 +24,7 @@ import {
   queueChatSend,
   useSyncState,
 } from "../sync";
-import { getMyProfile, type UserProfile } from "../profile";
+import { getMyName, saveMyName } from "../profile";
 import { colors } from "../theme";
 
 interface Props {
@@ -60,7 +60,7 @@ export function ChatScreen({ token, onBack }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [input, setInput] = useState("");
-  const [profile, setProfile] = useState<UserProfile>({ city: "Админ", address: "" });
+  const [myName, setMyName] = useState("Админ");
   const [loading, setLoading] = useState(true);
   const [isOffline, setIsOffline] = useState(false);
   const [sending, setSending] = useState(false);
@@ -73,8 +73,8 @@ export function ChatScreen({ token, onBack }: Props) {
 
   useEffect(() => {
     (async () => {
-      const p = await getMyProfile();
-      if (p.city) setProfile(p);
+      const name = await getMyName();
+      if (name) setMyName(name);
     })();
   }, []);
 
@@ -162,7 +162,7 @@ export function ChatScreen({ token, onBack }: Props) {
     setInput("");
     setSending(true);
     try {
-      const created = await api.sendChatMessage(token, text, profile.city, profile.address);
+      const created = await api.sendChatMessage(token, text, myName);
       setMessages((prev) => [...prev, created]);
       lastCreatedRef.current = created.createdAt;
       setIsOffline(false);
@@ -170,8 +170,8 @@ export function ChatScreen({ token, onBack }: Props) {
       if (isNetworkError(e) || isServerError(e)) {
         // Нет связи — сообщение уходит в очередь и отправится само
         const clientId = genId();
-        setPending((prev) => [...prev, { clientId, text, sender: profile.city }]);
-        await queueChatSend(clientId, text, profile.city, profile.address);
+        setPending((prev) => [...prev, { clientId, text, sender: myName }]);
+        await queueChatSend(clientId, text, myName);
         setIsOffline(true);
       } else {
         Alert.alert(
@@ -189,7 +189,7 @@ export function ChatScreen({ token, onBack }: Props) {
   const onLongPress = (item: ChatMessage | PendingMessage) => {
     if ("clientId" in item) return; // офлайн-сообщения нельзя
     const msg = item as ChatMessage;
-    if (msg.sender !== profile.city) return; // чужие тоже
+    if (msg.sender !== myName) return; // только мои сообщения
 
     Alert.alert("Сообщение", msg.text, [
       {
@@ -247,27 +247,17 @@ export function ChatScreen({ token, onBack }: Props) {
   };
 
   const renderItem = ({ item }: { item: ChatMessage | PendingMessage }) => {
-    const isOwn = item.sender === profile.city;
+    const isOwn = item.sender === myName;
     const isPending = "clientId" in item;
-    const isEdited =
-      !isPending && "editedAt" in item && (item as ChatMessage).editedAt;
     return (
       <Pressable
-        onLongPress={() => onLongPress(item)}
+        onLongPress={isOwn ? () => onLongPress(item) : undefined}
         delayLongPress={400}
         style={[
           styles.bubbleWrap,
           isOwn ? styles.bubbleWrapOwn : styles.bubbleWrapOther,
         ]}
       >
-        {!isOwn ? (
-          <>
-            <Text style={styles.bubbleSender}>{item.sender}</Text>
-            {"address" in item && (item as ChatMessage).address ? (
-              <Text style={styles.bubbleAddress}>{(item as ChatMessage).address}</Text>
-            ) : null}
-          </>
-        ) : null}
         <View
           style={[
             styles.bubble,
@@ -277,13 +267,12 @@ export function ChatScreen({ token, onBack }: Props) {
         >
           <Text style={[styles.bubbleText, isOwn && styles.bubbleTextOwn]}>
             {item.text}
-            {isPending ? " ⏳" : ""}
           </Text>
         </View>
         <Text style={styles.bubbleTime}>
-          {isOwn ? `Вы · ` : ""}
+          {isOwn ? `Вы · ` : `${item.sender} · `}
           {"createdAt" in item && item.createdAt ? formatTime(item.createdAt) : ""}
-          {isEdited ? " (ред.)" : ""}
+          {(item as ChatMessage).editedAt ? " (ред.)" : ""}
         </Text>
       </Pressable>
     );
@@ -297,7 +286,7 @@ export function ChatScreen({ token, onBack }: Props) {
         </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Чат</Text>
-          <Text style={styles.headerSubtitle}>Вы — {profile.city}{profile.address ? `, ${profile.address}` : ""}</Text>
+          <Text style={styles.headerSubtitle}>Вы — {myName}</Text>
         </View>
         <View style={styles.headerSpacer} />
       </View>
@@ -471,18 +460,6 @@ const styles = StyleSheet.create({
   bubbleWrapOther: {
     alignSelf: "flex-start",
     alignItems: "flex-start",
-  },
-  bubbleSender: {
-    color: colors.textMuted,
-    fontSize: 11,
-    fontWeight: "700",
-    marginLeft: 4,
-  },
-  bubbleAddress: {
-    color: colors.textMuted,
-    fontSize: 10,
-    marginLeft: 4,
-    opacity: 0.7,
   },
   bubble: {
     borderRadius: 14,

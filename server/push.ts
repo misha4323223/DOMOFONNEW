@@ -1,31 +1,30 @@
 import type { Lead } from "@shared/schema";
 import { listDeviceTokens } from "./ydb";
+import type { Review } from "./ydb";
 import { SERVICE_LABELS } from "@shared/services";
 
 /**
- * Отправка push-уведомлений о новой заявке через Expo Push API.
+ * Отправка push-уведомлений через Expo Push API.
  *
  * Мобильное приложение (Expo) при входе регистрирует свой ExpoPushToken
- * на сервере (POST /api/admin/push-token). Когда приходит новая заявка,
- * сервер рассылает уведомление на все зарегистрированные устройства.
+ * на сервере (POST /api/admin/push-token). Когда приходит новая заявка или
+ * новый отзыв, сервер рассылает уведомление на все зарегистрированные
+ * устройства.
  *
  * Для доставки на Android в standalone-APK нужно настроить Firebase (FCM) —
  * см. README в папке mobile/.
  */
 
-function buildMessage(lead: Lead): { title: string; body: string } {
-  const service = SERVICE_LABELS[lead.service] ?? lead.service;
-  const title = "📩 Новая заявка";
-  const body = `${lead.name}, ${lead.phone} — ${service}${lead.address ? `, ${lead.address}` : ""}`;
-  return { title, body };
+interface PushData {
+  [key: string]: string | number;
 }
 
 /**
  * Рассылает push всем зарегистрированным устройствам.
  * Пожаробезопасно: при любой ошибке уведомление молча пропускается,
- * заявка к этому моменту уже сохранена в БД.
+ * данные к этому моменту уже сохранены в БД.
  */
-export async function notifyNewLead(lead: Lead): Promise<void> {
+async function sendPush(title: string, body: string, data: PushData): Promise<void> {
   let tokens: string[];
   try {
     tokens = await listDeviceTokens();
@@ -34,8 +33,6 @@ export async function notifyNewLead(lead: Lead): Promise<void> {
     return;
   }
   if (tokens.length === 0) return;
-
-  const { title, body } = buildMessage(lead);
 
   // Expo Push API принимает до 100 токенов за запрос.
   for (let i = 0; i < tokens.length; i += 100) {
@@ -53,7 +50,7 @@ export async function notifyNewLead(lead: Lead): Promise<void> {
           // иначе система может молча выбросить уведомление.
           channelId: "default",
           priority: "high",
-          data: { leadId: lead.id, screen: "leads" },
+          data,
         }),
       });
 
@@ -96,4 +93,21 @@ export async function notifyNewLead(lead: Lead): Promise<void> {
       console.error("Не удалось отправить push:", err);
     }
   }
+}
+
+/** Уведомление о новой заявке (tap открывает список заявок). */
+export async function notifyNewLead(lead: Lead): Promise<void> {
+  const service = SERVICE_LABELS[lead.service] ?? lead.service;
+  const title = "📩 Новая заявка";
+  const body = `${lead.name}, ${lead.phone} — ${service}${lead.address ? `, ${lead.address}` : ""}`;
+  await sendPush(title, body, { leadId: lead.id, screen: "leads" });
+}
+
+/** Уведомление о новом отзыве — админу нужно промодерировать (tap открывает отзывы). */
+export async function notifyNewReview(review: Review): Promise<void> {
+  const title = "⭐ Новый отзыв";
+  const preview =
+    review.text.length > 90 ? `${review.text.slice(0, 90)}…` : review.text;
+  const body = `${review.name} — ${review.rating}★: ${preview}`;
+  await sendPush(title, body, { reviewId: review.id, screen: "reviews" });
 }

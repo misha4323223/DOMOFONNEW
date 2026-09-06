@@ -13,6 +13,7 @@ import { ReviewScreen } from "./src/screens/ReviewScreen";
 import { ContentScreen } from "./src/screens/ContentScreen";
 import { NotesScreen } from "./src/screens/NotesScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
+import { ReviewsScreen } from "./src/screens/ReviewsScreen";
 import { api, type Lead, type LeadCandidate } from "./src/api";
 import { flushPending } from "./src/sync";
 import { colors } from "./src/theme";
@@ -36,7 +37,8 @@ type Screen =
   | { name: "review"; candidates: LeadCandidate[]; fullText: string }
   | { name: "content" }
   | { name: "notes" }
-  | { name: "chat" };
+  | { name: "chat" }
+  | { name: "reviews" };
 
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -82,6 +84,22 @@ export default function App() {
     });
     return () => sub.remove();
   }, []);
+
+  // Push-уведомления: тап по «Новый отзыв» открывает модерацию отзывов,
+  // тап по «Новая заявка» — список заявок.
+  useEffect(() => {
+    if (!token) return;
+    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content
+        .data as { screen?: string } | null;
+      if (data?.screen === "reviews") {
+        setScreen({ name: "reviews" });
+      } else if (data?.screen === "leads") {
+        setScreen({ name: "leads" });
+      }
+    });
+    return () => sub.remove();
+  }, [token]);
 
   // Офлайн-очередь: отправляем накопленные изменения при входе, при возврате
   // приложения на передний план и каждые 20 секунд — пока есть токен.
@@ -174,6 +192,13 @@ export default function App() {
         <ChatScreen token={token} onBack={() => setScreen({ name: "leads" })} />
       </View>
     );
+  } else if (screen.name === "reviews") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <ReviewsScreen token={token} onBack={() => setScreen({ name: "leads" })} />
+      </View>
+    );
   } else if (screen.name === "review") {
     content = (
       <View style={styles.root}>
@@ -204,6 +229,7 @@ export default function App() {
           onContent={() => setScreen({ name: "content" })}
           onNotes={() => setScreen({ name: "notes" })}
           onChat={() => setScreen({ name: "chat" })}
+          onReviews={() => setScreen({ name: "reviews" })}
         />
       </View>
     );

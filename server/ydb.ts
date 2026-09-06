@@ -518,3 +518,138 @@ export async function deleteYdbChatMessage(id: string): Promise<boolean> {
   await docApi("DeleteItem", { TableName: CHAT_TABLE, Key: { id: { S: id } } });
   return true;
 }
+
+// --- Отзывы клиентов (таблица reviews) ---
+// Клиент оставляет отзыв на сайте — он попадает в статус "new" (на модерации),
+// админ публикует его в админке ("published") или скрывает ("hidden").
+// На сайте показываются только опубликованные.
+
+const REVIEWS_TABLE = "reviews";
+
+export type ReviewStatus = "new" | "published" | "hidden";
+
+export interface Review {
+  id: string;
+  /** Имя автора (как он представился). */
+  name: string;
+  /** Город — необязательное поле. */
+  city: string;
+  /** Оценка от 1 до 5 (строкой, как остальные поля в YDB). */
+  rating: string;
+  /** Текст отзыва. */
+  text: string;
+  status: ReviewStatus;
+  createdAt: string;
+}
+
+export interface ReviewInput {
+  name: string;
+  city: string;
+  rating: string;
+  text: string;
+}
+
+let reviewsTableReady: Promise<void> | undefined;
+
+async function ensureReviewsTable(): Promise<void> {
+  if (!reviewsTableReady) {
+    reviewsTableReady = (async () => {
+      try {
+        await docApi("CreateTable", {
+          TableName: REVIEWS_TABLE,
+          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
+          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Таблица уже существует — это нормально
+        if (!message.includes("ResourceInUseException")) {
+          throw error;
+        }
+      }
+    })();
+  }
+  await reviewsTableReady;
+}
+
+function toReviewItem(review: Review): Record<string, unknown> {
+  return {
+    id: { S: review.id },
+    name: { S: review.name },
+    city: { S: review.city ?? "" },
+    rating: { S: review.rating },
+    text: { S: review.text },
+    status: { S: review.status },
+    createdAt: { S: review.createdAt },
+  };
+}
+
+function fromReviewItem(
+  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
+): Review {
+  const status = item.status?.S;
+  return {
+    id: item.id?.S ?? "",
+    name: item.name?.S ?? "",
+    city: item.city?.S ?? "",
+    rating: item.rating?.S ?? "5",
+    text: item.text?.S ?? "",
+    // Неизвестный статус считаем «на модерации»
+    status: status === "published" || status === "hidden" ? status : "new",
+    createdAt: item.createdAt?.S ?? "",
+  };
+}
+
+/** Сохранить новый отзыв (всегда статус "new" — на модерации). */
+export async function createYdbReview(input: ReviewInput): Promise<Review> {
+  await ensureReviewsTable();
+  const review: Review = {
+    id: randomUUID(),
+    name: input.name,
+    city: input.city ?? "",
+    rating: input.rating,
+    text: input.text,
+    status: "new",
+    createdAt: new Date().toISOString(),
+  };
+  await docApi("PutItem", { TableName: REVIEWS_TABLE, Item: toReviewItem(review) });
+  return review;
+}
+
+/** Все отзывы (для админки), новые — первыми. */
+export async function listYdbReviews(): Promise<Review[]> {
+  await ensureReviewsTable();
+  const result = (await docApi("Scan", { TableName: REVIEWS_TABLE })) as
+    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
+    | undefined;
+  return (result?.Items ?? [])
+    .map((item) => fromReviewItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Публичные отзывы (только опубликованные), новые — первыми. */
+export async function listYdbPublishedReviews(): Promise<Review[]> {
+  const all = await listYdbReviews();
+  return all.filter((review) => review.status === "published");
+}
+
+export async function updateYdbReview(
+  id: string,
+  patch: Partial<Pick<Review, "status">>,
+): Promise<Review | undefined> {
+  const reviews = await listYdbReviews();
+  const current = reviews.find((review) => review.id === id);
+  if (!current) return undefined;
+  const updated: Review = {
+    ...current,
+    status: patch.status ?? current.status,
+  };
+  await docApi("PutItem", { TableName: REVIEWS_TABLE, Item: toReviewItem(updated) });
+  return updated;
+}
+
+export async function deleteYdbReview(id: string): Promise<boolean> {
+  await ensureReviewsTable();
+  await docApi("DeleteItem", { TableName: REVIEWS_TABLE, Key: { id: { S: id } } });
+  return true;
+}

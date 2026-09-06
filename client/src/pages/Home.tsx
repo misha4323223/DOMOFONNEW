@@ -2,6 +2,7 @@ import { Header } from "@/components/Header";
 import { Hero } from "@/components/Hero";
 import { Services } from "@/components/Services";
 import { Benefits } from "@/components/Benefits";
+import { Reviews } from "@/components/Reviews";
 import { Coverage } from "@/components/Coverage";
 import { RequestForm } from "@/components/RequestForm";
 import { Contact } from "@/components/Contact";
@@ -24,12 +25,18 @@ export default function Home() {
     <div className="min-h-screen flex flex-col">
       <Header content={content.header} onRequestClick={scrollToForm} />
       <main className="flex-1">
-        <Hero content={content.hero} onRequestClick={scrollToForm} />
+        <Hero
+          content={content.hero}
+          brandName={content.seo.brandName}
+          onRequestClick={scrollToForm}
+        />
         <Services content={content.services} />
         <Benefits content={content.benefits} />
         <Coverage content={content.coverage} />
         <RequestForm content={content.form} />
         <Contact content={content.contact} />
+        {/* Отзывы — ближе к подвалу, как просил владелец */}
+        <Reviews content={content.reviews} />
       </main>
       <Footer content={content.footer} />
     </div>

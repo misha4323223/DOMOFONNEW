@@ -54,7 +54,7 @@ export default function Privacy() {
           <section>
             <h2 className="text-2xl font-semibold mb-3">3. Цели обработки</h2>
             <ul className="list-disc pl-6 text-muted-foreground leading-relaxed space-y-2">
-              <li>приём и обработка заявок на установку и ремонт домофонов;</li>
+              <li>приём и обработка заявок на установку и обслуживание домофонов;</li>
               <li>обратный звонок и связь с заявителем по указанному номеру;</li>
               <li>оказание услуг, согласование времени и адреса выезда;</li>
               <li>улучшение работы сайта.</li>
@@ -97,14 +97,6 @@ export default function Privacy() {
               Телефон:{" "}
               <a href="tel:+79056298708" className="text-primary hover:underline">
                 +7 (905) 629-87-08
-              </a>
-              <br />
-              E-mail:{" "}
-              <a
-                href="mailto:info@domofon-service.ru"
-                className="text-primary hover:underline"
-              >
-                info@domofon-service.ru
               </a>
             </p>
           </section>
