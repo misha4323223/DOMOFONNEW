@@ -35,6 +35,8 @@ export interface Lead {
   address: string;
   comment: string | null;
   status: LeadStatus;
+  /** Откуда заявка: "site" — клиент с сайта, "admin" — добавлена вручную. */
+  source?: "site" | "admin";
   createdAt: string;
 }
 

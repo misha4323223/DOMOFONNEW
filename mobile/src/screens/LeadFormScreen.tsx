@@ -43,7 +43,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
 
   const save = async () => {
     if (!name.trim() || !phone.trim() || !address.trim()) {
-      setError("Заполните имя, телефон и адрес");
+      setError(isCityField ? "Заполните город, телефон и адрес" : "Заполните имя, телефон и адрес");
       return;
     }
     setBusy(true);
@@ -76,6 +76,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             id: clientId,
             ...body,
             status: "new",
+            source: "admin",
             createdAt: new Date().toISOString(),
           };
           await queueLeadCreate(clientId, body, full);
@@ -88,6 +89,10 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
       setBusy(false);
     }
   };
+
+  // Заявка, созданная вручную (админ), вместо имени клиента хранит город.
+  // Новая заявка всегда ручная; клиентские заявки с сайта — по полю source.
+  const isCityField = !lead || lead.source === "admin";
 
   return (
     <SafeAreaView style={styles.root}>
@@ -109,12 +114,12 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
-        <Text style={styles.label}>Имя</Text>
+        <Text style={styles.label}>{isCityField ? "Город" : "Имя"}</Text>
         <TextInput
           style={styles.input}
           value={name}
           onChangeText={setName}
-          placeholder="Как зовут клиента"
+          placeholder={isCityField ? "Например: Богородицк" : "Как зовут клиента"}
           placeholderTextColor={colors.textMuted}
         />
 

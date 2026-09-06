@@ -250,7 +250,14 @@ export function LeadsScreen({
       delayLongPress={500}
     >
       <View style={styles.cardHeader}>
-        <Text style={styles.cardName}>{item.name}</Text>
+        <View style={styles.cardTitleWrap}>
+          <Text style={styles.cardName}>{item.name}</Text>
+          {item.source === "admin" && (
+            <View style={styles.manualBadge}>
+              <Text style={styles.manualBadgeText}>✍️ Вручную</Text>
+            </View>
+          )}
+        </View>
         <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
       </View>
       <View style={styles.cardRow}>
@@ -474,11 +481,31 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 8,
   },
+  cardTitleWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flex: 1,
+  },
   cardName: {
     color: colors.text,
     fontSize: 17,
     fontWeight: "700",
-    flex: 1,
+    flexShrink: 1,
+  },
+  // Метка «Вручную»: заявку добавил админ через «+ Добавить», а не клиент с сайта
+  manualBadge: {
+    backgroundColor: "rgba(245,162,11,0.14)",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: "rgba(245,162,11,0.45)",
+  },
+  manualBadgeText: {
+    color: "#f5a20b",
+    fontSize: 11,
+    fontWeight: "700",
   },
   cardDate: {
     color: colors.textMuted,

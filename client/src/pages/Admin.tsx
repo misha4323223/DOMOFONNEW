@@ -62,6 +62,22 @@ const STATUS_OPTIONS: { value: LeadStatus; label: string }[] = [
 
 type AdminTab = "leads" | "reviews" | "site";
 
+/** Бейдж источника заявки: «Вручную» — добавил админ, иначе «С сайта». */
+function SourceBadge({ source }: { source?: string }) {
+  if (source === "admin") {
+    return (
+      <Badge className="shrink-0 border-violet-500/40 bg-violet-500/15 text-violet-600 dark:text-violet-400">
+        ✍️ Вручную
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="secondary" className="shrink-0">
+      С сайта
+    </Badge>
+  );
+}
+
 function StatusChips({
   lead,
   onPatch,
@@ -258,6 +274,9 @@ function LeadsBoard() {
                   <div key={lead.id} className="p-4 space-y-2">
                     <div className="flex items-start justify-between gap-3">
                       <span className="font-medium">{lead.name}</span>
+                      <SourceBadge source={lead.source} />
+                    </div>
+                    <div className="flex items-start justify-between gap-3">
                       <Badge variant="secondary" className="shrink-0">
                         {SERVICE_LABELS[lead.service] ?? lead.service}
                       </Badge>
@@ -288,7 +307,7 @@ function LeadsBoard() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Дата</TableHead>
-                      <TableHead>Имя</TableHead>
+                      <TableHead>Имя / Город</TableHead>
                       <TableHead>Телефон</TableHead>
                       <TableHead>Услуга</TableHead>
                       <TableHead>Статус</TableHead>
@@ -303,7 +322,10 @@ function LeadsBoard() {
                           {formatDate(lead.createdAt)}
                         </TableCell>
                         <TableCell className="font-medium">
-                          {lead.name}
+                          <div className="flex items-center gap-2">
+                            {lead.name}
+                            <SourceBadge source={lead.source} />
+                          </div>
                         </TableCell>
                         <TableCell>
                           <a

@@ -362,7 +362,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Обновление и удаление заявки — только для админа
   app.patch("/api/leads/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
-    const parsed = insertLeadSchema.partial().safeParse(req.body);
+    // Источник заявки админ менять не может — он проставляется при создании
+    const parsed = insertLeadSchema.partial().omit({ source: true }).safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
     }
@@ -381,7 +382,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (!parsed.success) {
       return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
     }
-    const lead = await storage.createLead(parsed.data);
+    const lead = await storage.createLead({ ...parsed.data, source: "admin" });
     // Оповестить телефоны (пожаробезопасно: ошибка push не ломает ответ)
     await notifyNewLead(lead).catch((err) =>
       console.error("Ошибка отправки push:", err),
@@ -399,8 +400,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     }
 
-    // Заявки с публичной формы всегда «новые» — статус управляется только админом
-    const lead = await storage.createLead({ ...parsed.data, status: "new" });
+    // Заявки с публичной формы всегда «новые», источник — сайт
+    const lead = await storage.createLead({ ...parsed.data, status: "new", source: "site" });
 
     console.log("Новая заявка получена:", JSON.stringify(lead, null, 2));
 

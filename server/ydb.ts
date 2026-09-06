@@ -62,6 +62,8 @@ export function toDynamoItem(lead: Lead): Record<string, unknown> {
     service: { S: lead.service },
     address: { S: lead.address },
     status: { S: lead.status ?? "new" },
+    // Источник заявки: "site" (клиент с сайта) или "admin" (добавлена вручную)
+    source: { S: lead.source ?? "site" },
     createdAt: { S: lead.createdAt },
   };
   if (lead.comment) {
@@ -83,6 +85,8 @@ export function fromDynamoItem(
     comment: item.comment?.S ?? null,
     // Старые записи без статуса считаем новыми
     status: status === "urgent" || status === "done" ? status : "new",
+    // Старые записи без поля source считаем заявками с сайта
+    source: item.source?.S === "admin" ? "admin" : "site",
     createdAt: item.createdAt?.S ?? "",
   };
 }
@@ -118,6 +122,7 @@ export async function createYdbLead(input: InsertLead): Promise<Lead> {
     address: input.address,
     comment: input.comment ?? null,
     status: input.status ?? "new",
+    source: input.source ?? "site",
     createdAt: new Date().toISOString(),
   };
   await docApi("PutItem", { TableName: TABLE_NAME, Item: toDynamoItem(lead) });
