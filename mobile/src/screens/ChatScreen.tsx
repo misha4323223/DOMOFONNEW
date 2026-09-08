@@ -461,10 +461,13 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     alignItems: "flex-start",
   },
+  // flexShrink: 1 — пузырь сжимается до maxWidth обёртки, иначе на новой
+  // архитектуре RN длинный текст не переносится и обрезается многоточием
   bubble: {
     borderRadius: 14,
     paddingHorizontal: 12,
     paddingVertical: 8,
+    flexShrink: 1,
   },
   bubbleOwn: {
     backgroundColor: colors.primary,
@@ -484,6 +487,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 15,
     lineHeight: 20,
+    flexShrink: 1,
   },
   bubbleTextOwn: {
     color: colors.primaryForeground,

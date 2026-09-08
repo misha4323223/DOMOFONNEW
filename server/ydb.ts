@@ -64,6 +64,8 @@ export function toDynamoItem(lead: Lead): Record<string, unknown> {
     status: { S: lead.status ?? "new" },
     // Источник заявки: "site" (клиент с сайта) или "admin" (добавлена вручную)
     source: { S: lead.source ?? "site" },
+    // Архив: "1" — заявка выполнена и убрана в архив админом
+    archived: { S: lead.archived ?? "0" },
     createdAt: { S: lead.createdAt },
   };
   if (lead.comment) {
@@ -87,6 +89,8 @@ export function fromDynamoItem(
     status: status === "urgent" || status === "done" ? status : "new",
     // Старые записи без поля source считаем заявками с сайта
     source: item.source?.S === "admin" ? "admin" : "site",
+    // Старые записи без поля archived считаем активными
+    archived: item.archived?.S === "1" ? "1" : "0",
     createdAt: item.createdAt?.S ?? "",
   };
 }
@@ -123,6 +127,7 @@ export async function createYdbLead(input: InsertLead): Promise<Lead> {
     comment: input.comment ?? null,
     status: input.status ?? "new",
     source: input.source ?? "site",
+    archived: input.archived ?? "0",
     createdAt: new Date().toISOString(),
   };
   await docApi("PutItem", { TableName: TABLE_NAME, Item: toDynamoItem(lead) });

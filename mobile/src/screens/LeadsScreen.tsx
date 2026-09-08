@@ -42,6 +42,7 @@ interface Props {
   onNotes: () => void;
   onChat: () => void;
   onReviews: () => void;
+  onArchive: () => void;
 }
 
 function formatDate(iso: string): string {
@@ -94,6 +95,7 @@ export function LeadsScreen({
   onNotes,
   onChat,
   onReviews,
+  onArchive,
 }: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -103,6 +105,9 @@ export function LeadsScreen({
   const [isOffline, setIsOffline] = useState(false);
   // Сколько изменений ждёт отправки (офлайн-очередь)
   const { pending: pendingCount, revision } = useSyncState();
+
+  // Активные заявки — без ушедших в архив (archived === "1")
+  const activeLeads = leads.filter((l) => l.archived !== "1");
 
   // После успешной отправки очереди (появился интернет) — перечитываем список,
   // чтобы локальные id созданных офлайн заявок заменились на настоящие.
@@ -207,6 +212,43 @@ export function LeadsScreen({
     return [styles.statusChipText, styles.statusChipTextNew];
   };
 
+  /** Отправить выполненную заявку в архив. */
+  const confirmArchive = (lead: Lead) => {
+    Alert.alert(
+      "Отправить в архив?",
+      `${lead.name} — ${serviceLabel(lead.service)}`,
+      [
+        { text: "Отмена", style: "cancel" },
+        {
+          text: "В архив",
+          onPress: async () => {
+            // Оптимистично убираем заявку из активного списка
+            setLeads((prev) =>
+              prev.map((l) => (l.id === lead.id ? { ...l, archived: "1" } : l)),
+            );
+            try {
+              await api.updateLead(token, lead.id, { archived: "1" });
+            } catch (e) {
+              if (isNetworkError(e) || isServerError(e)) {
+                // Нет связи — уйдёт в архив само, когда появится интернет
+                await queueLeadUpdate(lead.id, { archived: "1" });
+              } else {
+                // Сервер отверг — откатываем
+                setLeads((prev) =>
+                  prev.map((l) => (l.id === lead.id ? { ...l, archived: "0" } : l)),
+                );
+                Alert.alert(
+                  "Ошибка",
+                  e instanceof Error ? e.message : "Не удалось отправить в архив",
+                );
+              }
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const confirmDelete = (lead: Lead) => {
     Alert.alert(
       "Удалить заявку?",
@@ -293,6 +335,18 @@ export function LeadsScreen({
         <Text style={styles.cardComment}>💬 {item.comment}</Text>
       ) : null}
       <View style={styles.cardFooter}>
+        {(item.status ?? "new") === "done" && (
+          <Pressable
+            style={({ pressed }) => [
+              styles.archiveButton,
+              pressed && { opacity: 0.8 },
+            ]}
+            onPress={() => confirmArchive(item)}
+            hitSlop={6}
+          >
+            <Text style={styles.archiveButtonText}>🗄 В архив</Text>
+          </Pressable>
+        )}
         <Text style={styles.cardHint}>Нажмите, чтобы редактировать · удерживайте для удаления</Text>
       </View>
     </Pressable>
@@ -306,7 +360,7 @@ export function LeadsScreen({
           <View>
             <Text style={styles.headerTitle}>Заявки</Text>
             <Text style={styles.headerCount}>
-              {leads.length > 0 ? `${leads.length} шт.` : " "}
+              {activeLeads.length > 0 ? `${activeLeads.length} шт.` : " "}
             </Text>
           </View>
           <Pressable onPress={onLogout} hitSlop={12} style={styles.logoutButton}>
@@ -333,6 +387,9 @@ export function LeadsScreen({
           </Pressable>
           <Pressable onPress={onReviews} hitSlop={12} style={styles.scanButton}>
             <Text style={styles.scanButtonText}>⭐ Отзывы</Text>
+          </Pressable>
+          <Pressable onPress={onArchive} hitSlop={12} style={styles.scanButton}>
+            <Text style={styles.scanButtonText}>🗄 Архив</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [
@@ -370,7 +427,7 @@ export function LeadsScreen({
         </View>
       ) : (
         <FlatList
-          data={leads}
+          data={activeLeads}
           keyExtractor={(item) => item.id}
           renderItem={renderCard}
           contentContainerStyle={styles.list}
@@ -605,6 +662,22 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.cardBorder,
     paddingTop: 8,
+    gap: 8,
+  },
+  // Кнопка «В архив» на выполненных заявках
+  archiveButton: {
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: colors.inputBg,
+  },
+  archiveButtonText: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: "700",
   },
   cardHint: {
     color: colors.textMuted,

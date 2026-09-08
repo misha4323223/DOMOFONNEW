@@ -91,6 +91,7 @@ export class MemStorage implements IStorage {
       comment: insertLead.comment ?? null,
       status: insertLead.status ?? "new",
       source: insertLead.source ?? "site",
+      archived: insertLead.archived ?? "0",
       id: randomUUID(),
       createdAt: new Date().toISOString(),
     };

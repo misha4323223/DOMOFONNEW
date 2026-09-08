@@ -43,12 +43,17 @@ export const insertLeadSchema = createInsertSchema(leads)
     // Источник заявки: "site" (клиент с сайта) или "admin" (добавлена админом вручную).
     // Сервер всегда перекрывает это поле сам, клиент не может его подменить.
     source: z.enum(LEAD_SOURCES).optional(),
+    // Заявка в архиве: "1" — убрана из активного списка (после выполнения),
+    // "0" — активная. Меняется админом из мобильного приложения.
+    archived: z.enum(["0", "1"]).optional(),
   });
 
 export type InsertLead = z.infer<typeof insertLeadSchema>;
 export type Lead = typeof leads.$inferSelect & {
   status: LeadStatus;
   source: LeadSource;
+  /** "1" — заявка в архиве, "0" — активная. */
+  archived: string;
 };
 
 export type InsertUser = z.infer<typeof insertUserSchema>;

@@ -4,7 +4,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { insertLeadSchema, type Lead } from "@shared/schema";
 import { SERVICE_LABELS } from "@shared/services";
-import { notifyNewLead, notifyNewReview } from "./push";
+import { notifyNewLead, notifyNewReview, notifyChatMessage } from "./push";
 import { saveDeviceToken, removeDeviceToken } from "./ydb";
 import { recognizeHandwritten } from "./vision";
 import { parseCandidates } from "./parse";
@@ -489,6 +489,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       address: typeof req.body?.address === "string" ? req.body.address.trim() : "",
       text,
     });
+    // Push на телефоны админов (пожаробезопасно: ошибка не ломает отправку
+    // сообщения — оно уже сохранено). Тап по уведомлению открывает чат.
+    await notifyChatMessage(message).catch((err) =>
+      console.error("Ошибка отправки push о сообщении:", err),
+    );
     return res.status(201).json(message);
   }));
 

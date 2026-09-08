@@ -37,6 +37,8 @@ export interface Lead {
   status: LeadStatus;
   /** Откуда заявка: "site" — клиент с сайта, "admin" — добавлена вручную. */
   source?: "site" | "admin";
+  /** "1" — заявка в архиве (выполнена и убрана админом), "0" — активная. */
+  archived?: string;
   createdAt: string;
 }
 
@@ -48,7 +50,11 @@ export interface LeadInput {
   comment: string | null;
 }
 
-export type LeadPatch = Partial<LeadInput> & { status?: LeadStatus };
+export type LeadPatch = Partial<LeadInput> & {
+  status?: LeadStatus;
+  /** "1" — в архив, "0" — вернуть из архива. */
+  archived?: string;
+};
 
 export const LEAD_STATUSES: { value: LeadStatus; label: string }[] = [
   { value: "new", label: "Новая" },

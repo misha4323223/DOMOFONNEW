@@ -1,6 +1,6 @@
 import type { Lead } from "@shared/schema";
 import { listDeviceTokens } from "./ydb";
-import type { Review } from "./ydb";
+import type { Review, ChatMessage } from "./ydb";
 import { SERVICE_LABELS } from "@shared/services";
 
 /**
@@ -110,4 +110,17 @@ export async function notifyNewReview(review: Review): Promise<void> {
     review.text.length > 90 ? `${review.text.slice(0, 90)}…` : review.text;
   const body = `${review.name} — ${review.rating}★: ${preview}`;
   await sendPush(title, body, { reviewId: review.id, screen: "reviews" });
+}
+
+/**
+ * Уведомление о новом сообщении в чате админов (tap открывает чат).
+ * Шлётся на все устройства, включая отправителя, — так админ видит,
+ * что сообщение точно ушло.
+ */
+export async function notifyChatMessage(message: ChatMessage): Promise<void> {
+  const title = `💬 ${message.sender}`;
+  const preview =
+    message.text.length > 90 ? `${message.text.slice(0, 90)}…` : message.text;
+  const body = message.address ? `${message.address}: ${preview}` : preview;
+  await sendPush(title, body, { messageId: message.id, screen: "chat" });
 }

@@ -220,6 +220,9 @@ function LeadsBoard() {
     return () => clearInterval(interval);
   }, [load]);
 
+  // Активные заявки — без ушедших в архив (архивируются из мобильного приложения)
+  const activeLeads = (leads ?? []).filter((l) => l.archived !== "1");
+
   const setStatus = async (lead: Lead, status: LeadStatus) => {
     try {
       await apiRequest("PATCH", `/api/leads/${lead.id}`, { status });
@@ -238,7 +241,9 @@ function LeadsBoard() {
         <div>
           <h2 className="text-2xl font-bold">Заявки</h2>
           <p className="text-sm text-muted-foreground">
-            {leads ? `${leads.length} ${plural(leads.length)}` : "Загрузка…"}
+            {leads
+              ? `${activeLeads.length} ${plural(activeLeads.length)}`
+              : "Загрузка…"}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={load}>
@@ -258,7 +263,7 @@ function LeadsBoard() {
             <div className="flex items-center justify-center gap-3 py-16 text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" /> Загружаем заявки…
             </div>
-          ) : leads.length === 0 ? (
+          ) : activeLeads.length === 0 ? (
             <div className="py-16 text-center">
               <Inbox className="mx-auto mb-4 h-10 w-10 text-muted-foreground/50" />
               <p className="text-muted-foreground">Заявок пока нет</p>
@@ -270,7 +275,7 @@ function LeadsBoard() {
             <>
               {/* Мобильная версия: карточки вместо таблицы */}
               <div className="md:hidden divide-y divide-border">
-                {leads.map((lead) => (
+                {activeLeads.map((lead) => (
                   <div key={lead.id} className="p-4 space-y-2">
                     <div className="flex items-start justify-between gap-3">
                       <span className="font-medium">{lead.name}</span>
@@ -316,7 +321,7 @@ function LeadsBoard() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {leads.map((lead) => (
+                    {activeLeads.map((lead) => (
                       <TableRow key={lead.id}>
                         <TableCell className="whitespace-nowrap text-muted-foreground">
                           {formatDate(lead.createdAt)}
