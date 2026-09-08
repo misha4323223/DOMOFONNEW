@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 import { Driver } from "@ydbjs/core";
 import { CredentialsProvider } from "@ydbjs/auth";
 import { query, type QueryClient } from "@ydbjs/query";
+import { Optional } from "@ydbjs/value/optional";
+import { Text, TextType } from "@ydbjs/value/primitive";
 import { scanDocApiTable, type DocApiItem } from "./docapi";
 import type { InsertLead, Lead, LeadStatus, LeadSource } from "@shared/schema";
 
@@ -102,6 +104,16 @@ type Row = Record<string, unknown>;
 function str(row: Row, key: string): string {
   const value = row[key];
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * Обернуть nullable-строку в YDB Optional<Utf8> для параметра запроса:
+ * JS null в шаблонах @ydbjs не поддерживается напрямую.
+ */
+function optStr(value: string | null): Optional<TextType> {
+  return value === null
+    ? new Optional(null, new TextType())
+    : new Optional(new Text(value));
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +258,7 @@ async function migrateDocApiToYql(): Promise<void> {
         (id, name, phone, service, address, comment, status, source, archived, createdAt)
       VALUES
         (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
-         ${lead.comment}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
+         ${optStr(lead.comment)}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
     `;
   }
 
@@ -284,7 +296,7 @@ async function migrateDocApiToYql(): Promise<void> {
     await sql`
       UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt, editedAt)
       VALUES (${item.id?.S ?? ""}, ${item.sender?.S ?? ""}, ${item.address?.S ?? ""},
-              ${item.text?.S ?? ""}, ${item.createdAt?.S ?? ""}, ${item.editedAt?.S ?? null})
+              ${item.text?.S ?? ""}, ${item.createdAt?.S ?? ""}, ${optStr(item.editedAt?.S ?? null)})
     `;
   }
 
@@ -366,11 +378,10 @@ export async function createYdbLead(input: InsertLead): Promise<Lead> {
   };
   await sql`
     UPSERT INTO ${sql.identifier(T.leads)}
-      (id, name, phone, service, address, comment, status, source, archived, createdAt)
-    VALUES
-      (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
-       ${lead.comment}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
-  `;
+      (id, name, phone, service, address, comment, status, source, archived, createdAt)      VALUES
+        (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
+         ${optStr(lead.comment)}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
+    `;
   return lead;
 }
 
@@ -403,11 +414,10 @@ export async function updateYdbLead(
   const updated: Lead = { ...current, ...patch, comment: patch.comment ?? current.comment };
   await sql`
     UPSERT INTO ${sql.identifier(T.leads)}
-      (id, name, phone, service, address, comment, status, source, archived, createdAt)
-    VALUES
-      (${updated.id}, ${updated.name}, ${updated.phone}, ${updated.service}, ${updated.address},
-       ${updated.comment}, ${updated.status}, ${updated.source}, ${updated.archived}, ${updated.createdAt})
-  `;
+      (id, name, phone, service, address, comment, status, source, archived, createdAt)      VALUES
+        (${updated.id}, ${updated.name}, ${updated.phone}, ${updated.service}, ${updated.address},
+         ${optStr(updated.comment)}, ${updated.status}, ${updated.source}, ${updated.archived}, ${updated.createdAt})
+    `;
   return updated;
 }
 
