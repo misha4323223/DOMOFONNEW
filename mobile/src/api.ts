@@ -84,6 +84,9 @@ async function request(
   options: { method?: string; body?: unknown; token?: string | null } = {},
 ): Promise<any> {
   const headers: Record<string, string> = {};
+  // Никогда не кэшировать ответы API: иначе HTTP-кеш может прислать
+  // 304 Not Modified без тела, а это здесь считается ошибкой.
+  headers["Cache-Control"] = "no-store";
   if (options.body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
@@ -100,6 +103,9 @@ async function request(
   });
 
   if (res.status === 204) return undefined;
+  // 304 Not Modified не должен ронять экраны: без тела возвращать нечего,
+  // пусть вызывающий код использует то, что уже есть.
+  if (res.status === 304) return undefined;
 
   const text = await res.text();
   let data: any = null;

@@ -5,6 +5,10 @@ import { log } from "./log";
 import { serveStatic } from "./serve-static";
 
 const app = express();
+// Отключаем ETag: иначе Express отвечает 304 Not Modified на повторные
+// запросы без тела, а мобильное приложение (api.ts) и веб-админка считают
+// 304 ошибкой и не обновляют списки (архив выглядел пустым).
+app.disable("etag");
 // Лимит 12 МБ нужен эндпоинту /api/admin/scan — туда приходит фото
 // блокнота в base64 (внутри эндпоинта уже есть своя проверка размера).
 app.use(express.json({ limit: "12mb" }));
