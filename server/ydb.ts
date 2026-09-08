@@ -1,20 +1,45 @@
 import { randomUUID } from "crypto";
-import type { InsertLead, Lead } from "@shared/schema";
+import { Driver } from "@ydbjs/core";
+import { CredentialsProvider } from "@ydbjs/auth";
+import { query, type QueryClient } from "@ydbjs/query";
+import { scanDocApiTable, type DocApiItem } from "./docapi";
+import type { InsertLead, Lead, LeadStatus, LeadSource } from "@shared/schema";
+
+// ---------------------------------------------------------------------------
+// Подключение к YDB по YQL (обычные реляционные таблицы).
+//
+// ВАЖНО: раньше данные жили в документных таблицах (Document API, совместимый
+// с DynamoDB) — их нельзя менять через YQL, а атрибуты не были колонками.
+// Теперь сервер работает с обычными строковыми таблицами YQL с префиксом
+// `yql_` (yql_leads, yql_notes, ...). Старые документные таблицы (leads,
+// devices, ...) остаются нетронутыми как резервная копия — их можно удалить
+// через консоль YDB после того, как всё проверим.
+// ---------------------------------------------------------------------------
 
 const DATABASE_PATH =
   process.env.YDB_DATABASE_PATH ??
   "/ru-central1/b1gpj9488h3k7oaa3foh/etn1ah45qvisdme7mftg";
-const DOCUMENT_API_ENDPOINT =
-  process.env.YDB_DOCUMENT_API_ENDPOINT ??
-  `https://docapi.serverless.yandexcloud.net${DATABASE_PATH}`;
-const TABLE_NAME = "leads";
+const YDB_ENDPOINT = (
+  process.env.YDB_ENDPOINT ?? "grpcs://ydb.serverless.yandexcloud.net:2135"
+).replace(/\/+$/, "");
 
-let tableReady: Promise<void> | undefined;
+/** Имена новых YQL-таблиц (константы, в запросы подставляются как идентификаторы). */
+const T = {
+  leads: "yql_leads",
+  devices: "yql_devices",
+  settings: "yql_settings",
+  notes: "yql_notes",
+  chat: "yql_chat_messages",
+  reviews: "yql_reviews",
+} as const;
 
-export async function getIamToken(): Promise<string> {
+/** Получить IAM-токен сервис-аккаунта: из окружения (локально) или метаданных (в контейнере). */
+async function fetchIamToken(): Promise<{ token: string; expiresInMs: number }> {
   const explicit = process.env.YC_IAM_TOKEN;
-  if (explicit) return explicit;
-
+  if (explicit) {
+    // Для явного токена срок неизвестен — считаем 12 часов и обновляем заранее.
+    return { token: explicit, expiresInMs: 12 * 60 * 60 * 1000 };
+  }
   const response = await fetch(
     "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
     { headers: { "Metadata-Flavor": "Google" } },
@@ -22,61 +47,177 @@ export async function getIamToken(): Promise<string> {
   if (!response.ok) {
     throw new Error(`Yandex metadata token request failed: ${response.status}`);
   }
-  const data = (await response.json()) as { access_token?: string };
-  if (!data.access_token) throw new Error("Yandex metadata response has no access token");
-  return data.access_token;
+  const data = (await response.json()) as { access_token?: string; expires_in?: number };
+  if (!data.access_token) {
+    throw new Error("Yandex metadata response has no access token");
+  }
+  return {
+    token: data.access_token,
+    expiresInMs: (data.expires_in ?? 3600) * 1000,
+  };
 }
 
 /**
- * Запрос к Document API YDB по протоколу DynamoDB (HTTP).
- * POST отправляется на сам endpoint (в нём уже зашит путь базы),
- * операция задаётся заголовком X-Amz-Target.
+ * Провайдер IAM-токена для @ydbjs: кэширует токен и обновляет его
+ * заранее (за 5 минут до истечения), чтобы драйвер не ловил 401.
  */
-async function docApi(
-  target: string,
-  body: Record<string, unknown>,
-): Promise<Record<string, unknown> | undefined> {
-  const token = await getIamToken();
-  const response = await fetch(DOCUMENT_API_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "X-Amz-Target": `DynamoDB_20120810.${target}`,
-    },
-    body: JSON.stringify(body),
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`YDB Document API ${response.status}: ${text.slice(0, 500)}`);
+class YandexMetadataCredentialsProvider extends CredentialsProvider {
+  private token = "";
+  private expiresAt = 0;
+
+  async getToken(force = false): Promise<string> {
+    const now = Date.now();
+    if (!force && this.token && now < this.expiresAt - 5 * 60_000) {
+      return this.token;
+    }
+    const fetched = await fetchIamToken();
+    this.token = fetched.token;
+    this.expiresAt = now + fetched.expiresInMs;
+    return this.token;
   }
-  if (!text) return undefined;
-  return JSON.parse(text) as Record<string, unknown>;
 }
 
-export function toDynamoItem(lead: Lead): Record<string, unknown> {
-  const item: Record<string, unknown> = {
-    id: { S: lead.id },
-    name: { S: lead.name },
-    phone: { S: lead.phone },
-    service: { S: lead.service },
-    address: { S: lead.address },
-    status: { S: lead.status ?? "new" },
-    // Источник заявки: "site" (клиент с сайта) или "admin" (добавлена вручную)
-    source: { S: lead.source ?? "site" },
-    // Архив: "1" — заявка выполнена и убрана в архив админом
-    archived: { S: lead.archived ?? "0" },
-    createdAt: { S: lead.createdAt },
-  };
-  if (lead.comment) {
-    item.comment = { S: lead.comment };
+let sqlClient: QueryClient | undefined;
+let sqlReady: Promise<QueryClient> | undefined;
+
+/** Единый QueryClient на процесс (драйвер сам держит пул сессий). */
+async function getSql(): Promise<QueryClient> {
+  if (!sqlClient) {
+    sqlReady ??= (async () => {
+      const driver = new Driver(`${YDB_ENDPOINT}${DATABASE_PATH}`, {
+        credentialsProvider: new YandexMetadataCredentialsProvider(),
+      });
+      await driver.ready();
+      sqlClient = query(driver);
+      return sqlClient;
+    })();
+    sqlClient = await sqlReady;
   }
-  return item;
+  return sqlClient;
 }
 
-export function fromDynamoItem(
-  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
-): Lead {
+type Row = Record<string, unknown>;
+
+/** Безопасно достать строку из строки результата (NULL и не-строки → ""). */
+function str(row: Row, key: string): string {
+  const value = row[key];
+  return typeof value === "string" ? value : "";
+}
+
+// ---------------------------------------------------------------------------
+// Создание таблиц при первом обращении (аналог прежнего ensureTable).
+// Таблицы уже могут существовать (их создаёт миграция из консоли) —
+// IF NOT EXISTS делает вызов безопасным.
+// ---------------------------------------------------------------------------
+
+let tablesReady: Promise<void> | undefined;
+
+async function ensureTables(): Promise<void> {
+  if (!tablesReady) {
+    tablesReady = (async () => {
+      const sql = await getSql();
+      await sql`
+        CREATE TABLE IF NOT EXISTS ${sql.identifier(T.leads)} (
+          id Utf8 NOT NULL,
+          name Utf8 NOT NULL,
+          phone Utf8 NOT NULL,
+          service Utf8 NOT NULL,
+          address Utf8 NOT NULL,
+          comment Utf8,
+          status Utf8 NOT NULL,
+          source Utf8 NOT NULL,
+          archived Utf8 NOT NULL,
+          createdAt Utf8 NOT NULL,
+          PRIMARY KEY (id)
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS ${sql.identifier(T.devices)} (
+          token Utf8 NOT NULL,
+          registeredAt Utf8 NOT NULL,
+          PRIMARY KEY (token)
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS ${sql.identifier(T.settings)} (
+          key Utf8 NOT NULL,
+          value Utf8 NOT NULL,
+          updatedAt Utf8 NOT NULL,
+          PRIMARY KEY (key)
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS ${sql.identifier(T.notes)} (
+          id Utf8 NOT NULL,
+          text Utf8 NOT NULL,
+          author Utf8 NOT NULL,
+          done Utf8 NOT NULL,
+          createdAt Utf8 NOT NULL,
+          updatedAt Utf8 NOT NULL,
+          PRIMARY KEY (id)
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS ${sql.identifier(T.chat)} (
+          id Utf8 NOT NULL,
+          sender Utf8 NOT NULL,
+          address Utf8 NOT NULL,
+          text Utf8 NOT NULL,
+          createdAt Utf8 NOT NULL,
+          editedAt Utf8,
+          PRIMARY KEY (id)
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS ${sql.identifier(T.reviews)} (
+          id Utf8 NOT NULL,
+          name Utf8 NOT NULL,
+          city Utf8 NOT NULL,
+          rating Utf8 NOT NULL,
+          text Utf8 NOT NULL,
+          status Utf8 NOT NULL,
+          createdAt Utf8 NOT NULL,
+          PRIMARY KEY (id)
+        )
+      `;
+      // Таблицы готовы — запускаем одноразовый перенос данных из старых
+      // документных таблиц (не ждём: миграция идёт в фоне и повторяется
+      // при следующем обращении, если вдруг не удалась).
+      void runDocApiMigration().catch((err) =>
+        console.error(
+          "Не удалось перенести данные из документных таблиц (повторим при следующем обращении):",
+          err,
+        ),
+      );
+    })();
+  }
+  await tablesReady;
+}
+
+// ---------------------------------------------------------------------------
+// Одноразовая миграция: старые документные таблицы (Document API) → yql_*
+//
+// Через YQL атрибуты документных таблиц прочитать нельзя, поэтому читаем их
+// через Document API (server/docapi.ts) и перекладываем в обычные YQL-таблицы.
+// Идемпотентно: UPSERT по тому же ключу просто перезаписывает строку, маркер
+// в настройках защищает от повторного полного прогона.
+// ---------------------------------------------------------------------------
+
+/** Имена старых документных таблиц в базе. */
+const DOCAPI_TABLES = {
+  leads: "leads",
+  devices: "devices",
+  settings: "settings",
+  notes: "notes",
+  chat: "chat_messages",
+  reviews: "reviews",
+} as const;
+
+/** Ключ в yql_settings: миграция уже завершена (дата ISO). */
+const MIGRATION_MARKER_KEY = "migration:docapi:done";
+
+/** Элемент документной таблицы leads → заявка (те же умолчания, что и раньше). */
+function docApiItemToLead(item: DocApiItem): Lead {
   const status = item.status?.S;
   return {
     id: item.id?.S ?? "",
@@ -85,39 +226,132 @@ export function fromDynamoItem(
     service: item.service?.S ?? "",
     address: item.address?.S ?? "",
     comment: item.comment?.S ?? null,
-    // Старые записи без статуса считаем новыми
     status: status === "urgent" || status === "done" ? status : "new",
-    // Старые записи без поля source считаем заявками с сайта
     source: item.source?.S === "admin" ? "admin" : "site",
-    // Старые записи без поля archived считаем активными
     archived: item.archived?.S === "1" ? "1" : "0",
     createdAt: item.createdAt?.S ?? "",
   };
 }
 
-async function ensureTable(): Promise<void> {
-  if (!tableReady) {
-    tableReady = (async () => {
-      try {
-        await docApi("CreateTable", {
-          TableName: TABLE_NAME,
-          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
-          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Таблица уже существует — это нормально
-        if (!message.includes("ResourceInUseException")) {
-          throw error;
-        }
-      }
-    })();
+/** Перенести все данные из старых документных таблиц в новые yql_*. */
+async function migrateDocApiToYql(): Promise<void> {
+  const sql = await getSql();
+
+  // Заявки
+  const oldLeads = await scanDocApiTable(DOCAPI_TABLES.leads);
+  for (const item of oldLeads) {
+    const lead = docApiItemToLead(item);
+    await sql`
+      UPSERT INTO ${sql.identifier(T.leads)}
+        (id, name, phone, service, address, comment, status, source, archived, createdAt)
+      VALUES
+        (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
+         ${lead.comment}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
+    `;
   }
-  await tableReady;
+
+  // Push-токены
+  const oldDevices = await scanDocApiTable(DOCAPI_TABLES.devices);
+  for (const item of oldDevices) {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.devices)} (token, registeredAt)
+      VALUES (${item.token?.S ?? ""}, ${item.registeredAt?.S ?? ""})
+    `;
+  }
+
+  // Настройки сайта (контент главной страницы, фото)
+  const oldSettings = await scanDocApiTable(DOCAPI_TABLES.settings);
+  for (const item of oldSettings) {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.settings)} (key, value, updatedAt)
+      VALUES (${item.key?.S ?? ""}, ${item.value?.S ?? ""}, ${item.updatedAt?.S ?? ""})
+    `;
+  }
+
+  // Заметки
+  const oldNotes = await scanDocApiTable(DOCAPI_TABLES.notes);
+  for (const item of oldNotes) {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt)
+      VALUES (${item.id?.S ?? ""}, ${item.text?.S ?? ""}, ${item.author?.S ?? ""},
+              ${item.done?.S === "1" ? "1" : "0"}, ${item.createdAt?.S ?? ""}, ${item.updatedAt?.S ?? ""})
+    `;
+  }
+
+  // Чат
+  const oldChat = await scanDocApiTable(DOCAPI_TABLES.chat);
+  for (const item of oldChat) {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt, editedAt)
+      VALUES (${item.id?.S ?? ""}, ${item.sender?.S ?? ""}, ${item.address?.S ?? ""},
+              ${item.text?.S ?? ""}, ${item.createdAt?.S ?? ""}, ${item.editedAt?.S ?? null})
+    `;
+  }
+
+  // Отзывы
+  const oldReviews = await scanDocApiTable(DOCAPI_TABLES.reviews);
+  for (const item of oldReviews) {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.reviews)} (id, name, city, rating, text, status, createdAt)
+      VALUES (${item.id?.S ?? ""}, ${item.name?.S ?? ""}, ${item.city?.S ?? ""},
+              ${item.rating?.S ?? "5"}, ${item.text?.S ?? ""},
+              ${item.status?.S === "published" || item.status?.S === "hidden" ? item.status.S : "new"},
+              ${item.createdAt?.S ?? ""})
+    `;
+  }
+}
+
+let migrationReady: Promise<void> | undefined;
+
+/**
+ * Одноразовый перенос данных из документных таблиц в yql_*.
+ * Вызывается на старте сервера и лениво при каждом обращении к БД,
+ * пока не завершится успешно (маркер в настройках).
+ */
+export async function runDocApiMigration(): Promise<void> {
+  if (!migrationReady) {
+    migrationReady = (async () => {
+      const done = await getYdbSetting(MIGRATION_MARKER_KEY);
+      if (done) return;
+      await migrateDocApiToYql();
+      await putYdbSetting(MIGRATION_MARKER_KEY, new Date().toISOString());
+      console.log("Миграция документных таблиц в yql_* завершена");
+    })().catch((err) => {
+      // Даём шанс повторить при следующем обращении (миграция идемпотентна)
+      migrationReady = undefined;
+      throw err;
+    });
+  }
+  await migrationReady;
+}
+
+// ---------------------------------------------------------------------------
+// Заявки (таблица yql_leads)
+// ---------------------------------------------------------------------------
+
+/** Превратить строку YQL в объект заявки (с теми же умолчаниями, что и раньше). */
+function rowToLead(row: Row): Lead {
+  const status: LeadStatus =
+    row.status === "urgent" || row.status === "done" ? row.status : "new";
+  const source: LeadSource = row.source === "admin" ? "admin" : "site";
+  return {
+    id: str(row, "id"),
+    name: str(row, "name"),
+    phone: str(row, "phone"),
+    service: str(row, "service"),
+    address: str(row, "address"),
+    comment: row.comment == null ? null : str(row, "comment"),
+    status,
+    source,
+    // Записи без атрибута считаем активными
+    archived: row.archived === "1" ? "1" : "0",
+    createdAt: str(row, "createdAt"),
+  };
 }
 
 export async function createYdbLead(input: InsertLead): Promise<Lead> {
-  await ensureTable();
+  await ensureTables();
+  const sql = await getSql();
   const lead: Lead = {
     id: randomUUID(),
     name: input.name,
@@ -130,17 +364,25 @@ export async function createYdbLead(input: InsertLead): Promise<Lead> {
     archived: input.archived ?? "0",
     createdAt: new Date().toISOString(),
   };
-  await docApi("PutItem", { TableName: TABLE_NAME, Item: toDynamoItem(lead) });
+  await sql`
+    UPSERT INTO ${sql.identifier(T.leads)}
+      (id, name, phone, service, address, comment, status, source, archived, createdAt)
+    VALUES
+      (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
+       ${lead.comment}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
+  `;
   return lead;
 }
 
 export async function listYdbLeads(): Promise<Lead[]> {
-  await ensureTable();
-  const result = (await docApi("Scan", { TableName: TABLE_NAME })) as
-    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
-    | undefined;
-  return (result?.Items ?? [])
-    .map((item) => fromDynamoItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, name, phone, service, address, comment, status, source, archived, createdAt
+    FROM ${sql.identifier(T.leads)}
+  `;
+  return ((result[0] ?? []) as Row[])
+    .map((row) => rowToLead(row))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -148,180 +390,112 @@ export async function updateYdbLead(
   id: string,
   patch: Partial<InsertLead>,
 ): Promise<Lead | undefined> {
-  const leads = await listYdbLeads();
-  const current = leads.find((lead) => lead.id === id);
-  if (!current) return undefined;
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, name, phone, service, address, comment, status, source, archived, createdAt
+    FROM ${sql.identifier(T.leads)}
+    WHERE id = ${id}
+  `;
+  const row = (result[0] ?? [])[0] as Row | undefined;
+  if (!row) return undefined;
+  const current = rowToLead(row);
   const updated: Lead = { ...current, ...patch, comment: patch.comment ?? current.comment };
-  await docApi("PutItem", { TableName: TABLE_NAME, Item: toDynamoItem(updated) });
+  await sql`
+    UPSERT INTO ${sql.identifier(T.leads)}
+      (id, name, phone, service, address, comment, status, source, archived, createdAt)
+    VALUES
+      (${updated.id}, ${updated.name}, ${updated.phone}, ${updated.service}, ${updated.address},
+       ${updated.comment}, ${updated.status}, ${updated.source}, ${updated.archived}, ${updated.createdAt})
+  `;
   return updated;
 }
 
 export async function deleteYdbLead(id: string): Promise<boolean> {
-  await ensureTable();
-  await docApi("DeleteItem", { TableName: TABLE_NAME, Key: { id: { S: id } } });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`DELETE FROM ${sql.identifier(T.leads)} WHERE id = ${id}`;
   return true;
 }
 
-// --- Push-токены мобильного приложения (таблица devices) ---
-
-const DEVICES_TABLE = "devices";
-
-let devicesTableReady: Promise<void> | undefined;
-
-async function ensureDevicesTable(): Promise<void> {
-  if (!devicesTableReady) {
-    devicesTableReady = (async () => {
-      try {
-        await docApi("CreateTable", {
-          TableName: DEVICES_TABLE,
-          AttributeDefinitions: [{ AttributeName: "token", AttributeType: "S" }],
-          KeySchema: [{ AttributeName: "token", KeyType: "HASH" }],
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Таблица уже существует — это нормально
-        if (!message.includes("ResourceInUseException")) {
-          throw error;
-        }
-      }
-    })();
-  }
-  await devicesTableReady;
-}
+// ---------------------------------------------------------------------------
+// Push-токены мобильного приложения (таблица yql_devices)
+// ---------------------------------------------------------------------------
 
 /** Сохранить (или обновить) push-токен устройства. */
 export async function saveDeviceToken(token: string): Promise<void> {
-  await ensureDevicesTable();
-  await docApi("PutItem", {
-    TableName: DEVICES_TABLE,
-    Item: {
-      token: { S: token },
-      registeredAt: { S: new Date().toISOString() },
-    },
-  });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`
+    UPSERT INTO ${sql.identifier(T.devices)} (token, registeredAt)
+    VALUES (${token}, ${new Date().toISOString()})
+  `;
 }
 
 /** Список всех push-токенов устройств. */
 export async function listDeviceTokens(): Promise<string[]> {
-  await ensureDevicesTable();
-  const result = (await docApi("Scan", { TableName: DEVICES_TABLE })) as
-    | { Items?: Array<Record<string, { S?: string }>> }
-    | undefined;
-  return (result?.Items ?? [])
-    .map((item) => item.token?.S)
-    .filter((t): t is string => Boolean(t));
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`SELECT token FROM ${sql.identifier(T.devices)}`;
+  return ((result[0] ?? []) as Row[])
+    .map((row) => str(row, "token"))
+    .filter((t) => Boolean(t));
 }
 
 /** Удалить push-токен устройства (например, при выходе из приложения). */
 export async function removeDeviceToken(token: string): Promise<void> {
-  await ensureDevicesTable();
-  await docApi("DeleteItem", {
-    TableName: DEVICES_TABLE,
-    Key: { token: { S: token } },
-  });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`DELETE FROM ${sql.identifier(T.devices)} WHERE token = ${token}`;
 }
 
-// --- Настройки сайта (контент главной страницы, загруженные фото) ---
-// Простая key-value таблица: в `value` лежит JSON-строка или data-url фото.
-
-const SETTINGS_TABLE = "settings";
-
-let settingsTableReady: Promise<void> | undefined;
-
-async function ensureSettingsTable(): Promise<void> {
-  if (!settingsTableReady) {
-    settingsTableReady = (async () => {
-      try {
-        await docApi("CreateTable", {
-          TableName: SETTINGS_TABLE,
-          AttributeDefinitions: [{ AttributeName: "key", AttributeType: "S" }],
-          KeySchema: [{ AttributeName: "key", KeyType: "HASH" }],
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Таблица уже существует — это нормально
-        if (!message.includes("ResourceInUseException")) {
-          throw error;
-        }
-      }
-    })();
-  }
-  await settingsTableReady;
-}
+// ---------------------------------------------------------------------------
+// Настройки сайта (таблица yql_settings, key/value)
+// ---------------------------------------------------------------------------
 
 export interface StoredSetting {
   value: string;
   updatedAt: string;
 }
 
-/** Прочитать настройку по ключу (key/value-таблица, документная модель YDB). */
+/** Прочитать настройку по ключу. */
 export async function getYdbSetting(key: string): Promise<StoredSetting | undefined> {
-  await ensureSettingsTable();
-  const result = (await docApi("GetItem", {
-    TableName: SETTINGS_TABLE,
-    Key: { key: { S: key } },
-  })) as
-    | { Item?: Record<string, { S?: string }> }
-    | undefined;
-  const item = result?.Item;
-  if (!item || item.value?.S === undefined) return undefined;
-  return { value: item.value.S, updatedAt: item.updatedAt?.S ?? "" };
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT value, updatedAt FROM ${sql.identifier(T.settings)} WHERE key = ${key}
+  `;
+  const row = (result[0] ?? [])[0] as Row | undefined;
+  if (!row) return undefined;
+  return { value: str(row, "value"), updatedAt: str(row, "updatedAt") };
 }
 
 /** Сохранить настройку (создаст или перезапишет запись). */
 export async function putYdbSetting(key: string, value: string): Promise<void> {
-  await ensureSettingsTable();
-  await docApi("PutItem", {
-    TableName: SETTINGS_TABLE,
-    Item: {
-      key: { S: key },
-      value: { S: value },
-      updatedAt: { S: new Date().toISOString() },
-    },
-  });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`
+    UPSERT INTO ${sql.identifier(T.settings)} (key, value, updatedAt)
+    VALUES (${key}, ${value}, ${new Date().toISOString()})
+  `;
 }
 
 /** Удалить настройку (например, фото героя при возврате к стандартному). */
 export async function deleteYdbSetting(key: string): Promise<void> {
-  await ensureSettingsTable();
-  await docApi("DeleteItem", {
-    TableName: SETTINGS_TABLE,
-    Key: { key: { S: key } },
-  });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`DELETE FROM ${sql.identifier(T.settings)} WHERE key = ${key}`;
 }
 
-// --- Заметки (мобильное приложение, таблица notes) ---
-
-const NOTES_TABLE = "notes";
-
-let notesTableReady: Promise<void> | undefined;
-
-async function ensureNotesTable(): Promise<void> {
-  if (!notesTableReady) {
-    notesTableReady = (async () => {
-      try {
-        await docApi("CreateTable", {
-          TableName: NOTES_TABLE,
-          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
-          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Таблица уже существует — это нормально
-        if (!message.includes("ResourceInUseException")) {
-          throw error;
-        }
-      }
-    })();
-  }
-  await notesTableReady;
-}
+// ---------------------------------------------------------------------------
+// Заметки (таблица yql_notes)
+// ---------------------------------------------------------------------------
 
 export interface Note {
   id: string;
   text: string;
   author: string;
-  /** "0" — не выполнено, "1" — выполнено (в YDB храним строкой, как остальные поля). */
+  /** "0" — не выполнено, "1" — выполнено (храним строкой, как остальные поля). */
   done: string;
   createdAt: string;
   updatedAt: string;
@@ -334,33 +508,9 @@ export interface NoteInput {
 
 export type NotePatch = Partial<NoteInput> & { done?: string };
 
-function toNoteItem(note: Note): Record<string, unknown> {
-  const item: Record<string, unknown> = {
-    id: { S: note.id },
-    text: { S: note.text },
-    author: { S: note.author },
-    done: { S: note.done ?? "0" },
-    createdAt: { S: note.createdAt },
-    updatedAt: { S: note.updatedAt },
-  };
-  return item;
-}
-
-function fromNoteItem(
-  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
-): Note {
-  return {
-    id: item.id?.S ?? "",
-    text: item.text?.S ?? "",
-    author: item.author?.S ?? "",
-    done: item.done?.S === "1" ? "1" : "0",
-    createdAt: item.createdAt?.S ?? "",
-    updatedAt: item.updatedAt?.S ?? "",
-  };
-}
-
 export async function createYdbNote(input: NoteInput): Promise<Note> {
-  await ensureNotesTable();
+  await ensureTables();
+  const sql = await getSql();
   const now = new Date().toISOString();
   const note: Note = {
     id: randomUUID(),
@@ -370,17 +520,28 @@ export async function createYdbNote(input: NoteInput): Promise<Note> {
     createdAt: now,
     updatedAt: now,
   };
-  await docApi("PutItem", { TableName: NOTES_TABLE, Item: toNoteItem(note) });
+  await sql`
+    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt)
+    VALUES (${note.id}, ${note.text}, ${note.author}, ${note.done}, ${note.createdAt}, ${note.updatedAt})
+  `;
   return note;
 }
 
 export async function listYdbNotes(): Promise<Note[]> {
-  await ensureNotesTable();
-  const result = (await docApi("Scan", { TableName: NOTES_TABLE })) as
-    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
-    | undefined;
-  return (result?.Items ?? [])
-    .map((item) => fromNoteItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)}
+  `;
+  return ((result[0] ?? []) as Row[])
+    .map((row) => ({
+      id: str(row, "id"),
+      text: str(row, "text"),
+      author: str(row, "author"),
+      done: row.done === "1" ? "1" : "0",
+      createdAt: str(row, "createdAt"),
+      updatedAt: str(row, "updatedAt"),
+    }))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -388,50 +549,39 @@ export async function updateYdbNote(
   id: string,
   patch: NotePatch,
 ): Promise<Note | undefined> {
-  const notes = await listYdbNotes();
-  const current = notes.find((note) => note.id === id);
-  if (!current) return undefined;
-  const updated: Note = {
-    ...current,
-    ...patch,
-    updatedAt: new Date().toISOString(),
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)} WHERE id = ${id}
+  `;
+  const row = (result[0] ?? [])[0] as Row | undefined;
+  if (!row) return undefined;
+  const current: Note = {
+    id: str(row, "id"),
+    text: str(row, "text"),
+    author: str(row, "author"),
+    done: row.done === "1" ? "1" : "0",
+    createdAt: str(row, "createdAt"),
+    updatedAt: str(row, "updatedAt"),
   };
-  await docApi("PutItem", { TableName: NOTES_TABLE, Item: toNoteItem(updated) });
+  const updated: Note = { ...current, ...patch, updatedAt: new Date().toISOString() };
+  await sql`
+    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt)
+    VALUES (${updated.id}, ${updated.text}, ${updated.author}, ${updated.done}, ${updated.createdAt}, ${updated.updatedAt})
+  `;
   return updated;
 }
 
 export async function deleteYdbNote(id: string): Promise<boolean> {
-  await ensureNotesTable();
-  await docApi("DeleteItem", { TableName: NOTES_TABLE, Key: { id: { S: id } } });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`DELETE FROM ${sql.identifier(T.notes)} WHERE id = ${id}`;
   return true;
 }
 
-// --- Чат между админами (мобильное приложение, таблица chat_messages) ---
-
-const CHAT_TABLE = "chat_messages";
-
-let chatTableReady: Promise<void> | undefined;
-
-async function ensureChatTable(): Promise<void> {
-  if (!chatTableReady) {
-    chatTableReady = (async () => {
-      try {
-        await docApi("CreateTable", {
-          TableName: CHAT_TABLE,
-          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
-          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Таблица уже существует — это нормально
-        if (!message.includes("ResourceInUseException")) {
-          throw error;
-        }
-      }
-    })();
-  }
-  await chatTableReady;
-}
+// ---------------------------------------------------------------------------
+// Чат между админами (таблица yql_chat_messages)
+// ---------------------------------------------------------------------------
 
 export interface ChatMessage {
   id: string;
@@ -450,35 +600,9 @@ export interface ChatMessageInput {
   text: string;
 }
 
-function toChatItem(message: ChatMessage): Record<string, unknown> {
-  const item: Record<string, unknown> = {
-    id: { S: message.id },
-    sender: { S: message.sender },
-    address: { S: message.address ?? "" },
-    text: { S: message.text },
-    createdAt: { S: message.createdAt },
-  };
-  if (message.editedAt) {
-    item.editedAt = { S: message.editedAt };
-  }
-  return item;
-}
-
-function fromChatItem(
-  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
-): ChatMessage {
-  return {
-    id: item.id?.S ?? "",
-    sender: item.sender?.S ?? "",
-    address: item.address?.S ?? "",
-    text: item.text?.S ?? "",
-    createdAt: item.createdAt?.S ?? "",
-    editedAt: item.editedAt?.S || undefined,
-  };
-}
-
 export async function sendYdbChatMessage(input: ChatMessageInput): Promise<ChatMessage> {
-  await ensureChatTable();
+  await ensureTables();
+  const sql = await getSql();
   const message: ChatMessage = {
     id: randomUUID(),
     sender: input.sender,
@@ -486,7 +610,10 @@ export async function sendYdbChatMessage(input: ChatMessageInput): Promise<ChatM
     text: input.text,
     createdAt: new Date().toISOString(),
   };
-  await docApi("PutItem", { TableName: CHAT_TABLE, Item: toChatItem(message) });
+  await sql`
+    UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt)
+    VALUES (${message.id}, ${message.sender}, ${message.address}, ${message.text}, ${message.createdAt})
+  `;
   return message;
 }
 
@@ -494,13 +621,20 @@ export async function listYdbChatMessages(
   after?: string,
   limit = 200,
 ): Promise<ChatMessage[]> {
-  await ensureChatTable();
-  const result = (await docApi("Scan", { TableName: CHAT_TABLE })) as
-    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
-    | undefined;
-  const all = (result?.Items ?? [])
-    .map((item) => fromChatItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, sender, address, text, createdAt, editedAt FROM ${sql.identifier(T.chat)}
+    ORDER BY createdAt
+  `;
+  const all = ((result[0] ?? []) as Row[]).map((row) => ({
+    id: str(row, "id"),
+    sender: str(row, "sender"),
+    address: str(row, "address"),
+    text: str(row, "text"),
+    createdAt: str(row, "createdAt"),
+    editedAt: row.editedAt == null ? undefined : str(row, "editedAt"),
+  }));
   const filtered = after ? all.filter((m) => m.createdAt > after) : all;
   // Возвращаем последние `limit` сообщений (по возрастанию времени).
   return filtered.length > limit ? filtered.slice(filtered.length - limit) : filtered;
@@ -510,31 +644,43 @@ export async function updateYdbChatMessage(
   id: string,
   patch: { text?: string },
 ): Promise<ChatMessage | undefined> {
-  await ensureChatTable();
-  const messages = await listYdbChatMessages();
-  const current = messages.find((m) => m.id === id);
-  if (!current) return undefined;
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, sender, address, text, createdAt, editedAt FROM ${sql.identifier(T.chat)} WHERE id = ${id}
+  `;
+  const row = (result[0] ?? [])[0] as Row | undefined;
+  if (!row) return undefined;
+  const current: ChatMessage = {
+    id: str(row, "id"),
+    sender: str(row, "sender"),
+    address: str(row, "address"),
+    text: str(row, "text"),
+    createdAt: str(row, "createdAt"),
+    editedAt: row.editedAt == null ? undefined : str(row, "editedAt"),
+  };
   const updated: ChatMessage = {
     ...current,
     text: patch.text ?? current.text,
     editedAt: new Date().toISOString(),
   };
-  await docApi("PutItem", { TableName: CHAT_TABLE, Item: toChatItem(updated) });
+  await sql`
+    UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt, editedAt)
+    VALUES (${updated.id}, ${updated.sender}, ${updated.address}, ${updated.text}, ${updated.createdAt}, ${updated.editedAt})
+  `;
   return updated;
 }
 
 export async function deleteYdbChatMessage(id: string): Promise<boolean> {
-  await ensureChatTable();
-  await docApi("DeleteItem", { TableName: CHAT_TABLE, Key: { id: { S: id } } });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`DELETE FROM ${sql.identifier(T.chat)} WHERE id = ${id}`;
   return true;
 }
 
-// --- Отзывы клиентов (таблица reviews) ---
-// Клиент оставляет отзыв на сайте — он попадает в статус "new" (на модерации),
-// админ публикует его в админке ("published") или скрывает ("hidden").
-// На сайте показываются только опубликованные.
-
-const REVIEWS_TABLE = "reviews";
+// ---------------------------------------------------------------------------
+// Отзывы клиентов (таблица yql_reviews)
+// ---------------------------------------------------------------------------
 
 export type ReviewStatus = "new" | "published" | "hidden";
 
@@ -544,7 +690,7 @@ export interface Review {
   name: string;
   /** Город — необязательное поле. */
   city: string;
-  /** Оценка от 1 до 5 (строкой, как остальные поля в YDB). */
+  /** Оценка от 1 до 5 (строкой, как остальные поля). */
   rating: string;
   /** Текст отзыва. */
   text: string;
@@ -559,60 +705,10 @@ export interface ReviewInput {
   text: string;
 }
 
-let reviewsTableReady: Promise<void> | undefined;
-
-async function ensureReviewsTable(): Promise<void> {
-  if (!reviewsTableReady) {
-    reviewsTableReady = (async () => {
-      try {
-        await docApi("CreateTable", {
-          TableName: REVIEWS_TABLE,
-          AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }],
-          KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        // Таблица уже существует — это нормально
-        if (!message.includes("ResourceInUseException")) {
-          throw error;
-        }
-      }
-    })();
-  }
-  await reviewsTableReady;
-}
-
-function toReviewItem(review: Review): Record<string, unknown> {
-  return {
-    id: { S: review.id },
-    name: { S: review.name },
-    city: { S: review.city ?? "" },
-    rating: { S: review.rating },
-    text: { S: review.text },
-    status: { S: review.status },
-    createdAt: { S: review.createdAt },
-  };
-}
-
-function fromReviewItem(
-  item: Record<string, { S?: string; N?: string; NULL?: boolean } | undefined>,
-): Review {
-  const status = item.status?.S;
-  return {
-    id: item.id?.S ?? "",
-    name: item.name?.S ?? "",
-    city: item.city?.S ?? "",
-    rating: item.rating?.S ?? "5",
-    text: item.text?.S ?? "",
-    // Неизвестный статус считаем «на модерации»
-    status: status === "published" || status === "hidden" ? status : "new",
-    createdAt: item.createdAt?.S ?? "",
-  };
-}
-
 /** Сохранить новый отзыв (всегда статус "new" — на модерации). */
 export async function createYdbReview(input: ReviewInput): Promise<Review> {
-  await ensureReviewsTable();
+  await ensureTables();
+  const sql = await getSql();
   const review: Review = {
     id: randomUUID(),
     name: input.name,
@@ -622,18 +718,36 @@ export async function createYdbReview(input: ReviewInput): Promise<Review> {
     status: "new",
     createdAt: new Date().toISOString(),
   };
-  await docApi("PutItem", { TableName: REVIEWS_TABLE, Item: toReviewItem(review) });
+  await sql`
+    UPSERT INTO ${sql.identifier(T.reviews)} (id, name, city, rating, text, status, createdAt)
+    VALUES (${review.id}, ${review.name}, ${review.city}, ${review.rating}, ${review.text}, ${review.status}, ${review.createdAt})
+  `;
   return review;
 }
 
 /** Все отзывы (для админки), новые — первыми. */
 export async function listYdbReviews(): Promise<Review[]> {
-  await ensureReviewsTable();
-  const result = (await docApi("Scan", { TableName: REVIEWS_TABLE })) as
-    | { Items?: Record<string, Record<string, { S?: string; N?: string; NULL?: boolean }>>[] }
-    | undefined;
-  return (result?.Items ?? [])
-    .map((item) => fromReviewItem(item as Record<string, { S?: string; N?: string; NULL?: boolean }>))
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, name, city, rating, text, status, createdAt FROM ${sql.identifier(T.reviews)}
+  `;
+  return ((result[0] ?? []) as Row[])
+    .map((row) => {
+      const status = str(row, "status");
+      return {
+        id: str(row, "id"),
+        name: str(row, "name"),
+        city: str(row, "city"),
+        rating: str(row, "rating") || "5",
+        text: str(row, "text"),
+        // Неизвестный статус считаем «на модерации»
+        status: (status === "published" || status === "hidden"
+          ? status
+          : "new") as ReviewStatus,
+        createdAt: str(row, "createdAt"),
+      };
+    })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -647,19 +761,34 @@ export async function updateYdbReview(
   id: string,
   patch: Partial<Pick<Review, "status">>,
 ): Promise<Review | undefined> {
-  const reviews = await listYdbReviews();
-  const current = reviews.find((review) => review.id === id);
-  if (!current) return undefined;
-  const updated: Review = {
-    ...current,
-    status: patch.status ?? current.status,
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, name, city, rating, text, status, createdAt FROM ${sql.identifier(T.reviews)} WHERE id = ${id}
+  `;
+  const row = (result[0] ?? [])[0] as Row | undefined;
+  if (!row) return undefined;
+  const status = str(row, "status");
+  const current: Review = {
+    id: str(row, "id"),
+    name: str(row, "name"),
+    city: str(row, "city"),
+    rating: str(row, "rating") || "5",
+    text: str(row, "text"),
+    status: (status === "published" || status === "hidden" ? status : "new") as ReviewStatus,
+    createdAt: str(row, "createdAt"),
   };
-  await docApi("PutItem", { TableName: REVIEWS_TABLE, Item: toReviewItem(updated) });
+  const updated: Review = { ...current, status: patch.status ?? current.status };
+  await sql`
+    UPSERT INTO ${sql.identifier(T.reviews)} (id, name, city, rating, text, status, createdAt)
+    VALUES (${updated.id}, ${updated.name}, ${updated.city}, ${updated.rating}, ${updated.text}, ${updated.status}, ${updated.createdAt})
+  `;
   return updated;
 }
 
 export async function deleteYdbReview(id: string): Promise<boolean> {
-  await ensureReviewsTable();
-  await docApi("DeleteItem", { TableName: REVIEWS_TABLE, Key: { id: { S: id } } });
+  await ensureTables();
+  const sql = await getSql();
+  await sql`DELETE FROM ${sql.identifier(T.reviews)} WHERE id = ${id}`;
   return true;
 }

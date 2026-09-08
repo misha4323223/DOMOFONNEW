@@ -1,5 +1,6 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
+import { runDocApiMigration } from "./ydb";
 import { log } from "./log";
 import { serveStatic } from "./serve-static";
 
@@ -53,6 +54,17 @@ app.use((req, res, next) => {
 
 (async () => {
   const server = await registerRoutes(app);
+
+  // Одноразовый перенос данных из старых документных таблиц (Document API)
+  // в новые обычные YQL-таблицы yql_*. Запускаем ДО приёма трафика, чтобы
+  // к моменту первого запроса всё уже было на месте. Если не получилось —
+  // сервер всё равно поднимется, миграция повторится при обращении к БД.
+  await runDocApiMigration().catch((err) =>
+    console.error(
+      "Миграция документных таблиц не удалась при старте (повторится при первом обращении к БД):",
+      err,
+    ),
+  );
 
   // Важно: НЕ бросаем err повторно — в Express 4 ошибка из error-middleware
   // больше никем не ловится и уронит весь процесс (контейнер → 502).
