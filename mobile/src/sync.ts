@@ -339,15 +339,6 @@ export async function flushPending(
     return { sent: 0 };
   }
 
-  // Удаляем операции старше 10 минут — они застряли из-за постоянных ошибок сервера.
-  const MAX_OP_AGE_MS = 10 * 60 * 1000;
-  const now = Date.now();
-  const staleOps = ops.filter((op) => now - op.createdAt > MAX_OP_AGE_MS);
-  if (staleOps.length > 0) {
-    ops = ops.filter((op) => now - op.createdAt <= MAX_OP_AGE_MS);
-    await writeQueue(ops);
-  }
-
   let sent = 0;
   for (let i = 0; i < ops.length; i++) {
     const op = ops[i];

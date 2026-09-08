@@ -85,8 +85,13 @@ export function ArchiveScreen({ token, onBack }: Props) {
       setError(null);
     } catch (e) {
       if (isNetworkError(e) || isServerError(e)) {
-        // Нет связи — вернётся само, когда появится интернет
+        // Нет связи — вернётся само, когда появится интернет.
+        // Операция лежит в офлайн-очереди и отправится при появлении связи.
         await queueLeadUpdate(lead.id, { archived: "0" });
+        Alert.alert(
+          "Вернём позже",
+          "Нет связи с сервером — заявка вернётся в список автоматически, как только интернет появится.",
+        );
       } else {
         setLeads((list) => (list ? [...list, lead] : list));
         Alert.alert(
