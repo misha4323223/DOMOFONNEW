@@ -30,6 +30,9 @@ import {
   useSyncState,
 } from "../sync";
 import { getMyName, saveMyName } from "../profile";
+import { markChatRead } from "../unread";
+import { EmptyState } from "../components/EmptyState";
+import { ChatSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 
 interface Props {
@@ -189,12 +192,26 @@ export function ChatScreen({ token, onBack }: Props) {
     })();
   }, []);
 
+  // При уходе с экрана чата фиксируем якорь прочтения — серверное время
+  // последнего увиденного сообщения (всё, что админ видел, не должно
+  // попасть в счётчик непрочитанных).
+  useEffect(() => {
+    return () => {
+      markChatRead(lastCreatedRef.current ?? null);
+    };
+  }, []);
+
   /** Обновить список сообщений (полная перезагрузка). */
   const loadAll = useCallback(async () => {
     try {
       const data = await api.chatMessages(token);
       setMessages(data ?? []);
+      // Очищаем pending: сервер — источник правды, оффлайн-копии
+      // больше не нужны (flushPending уже отправил их).
+      setPending([]);
       lastCreatedRef.current = data?.[data.length - 1]?.createdAt;
+      // Чат открыт — якорь прочтения = серверное время последнего сообщения
+      markChatRead(lastCreatedRef.current ?? null);
       setIsOffline(false);
       await flushPending(token);
     } catch (e) {
@@ -217,6 +234,9 @@ export function ChatScreen({ token, onBack }: Props) {
         lastCreatedRef.current = data[data.length - 1].createdAt;
       }
       setIsOffline(false);
+      // Чат открыт и просматривается — якорь прочтения держим на серверном
+      // времени последнего сообщения, чтобы счётчик на табе обнулялся
+      markChatRead(lastCreatedRef.current ?? null);
       // Подтягиваем актуальный список «ожидающих» — отправленные уходят из него
       const queued = await pendingChatClientIds();
       setPending((prev) => prev.filter((p) => queued.includes(p.clientId)));
@@ -522,9 +542,7 @@ export function ChatScreen({ token, onBack }: Props) {
         keyboardVerticalOffset={0}
       >
         {loading ? (
-          <View style={styles.center}>
-            <ActivityIndicator size="large" color={colors.primary} />
-          </View>
+          <ChatSkeleton />
         ) : (
           <FlatList
             ref={listRef}
@@ -541,10 +559,11 @@ export function ChatScreen({ token, onBack }: Props) {
             onContentSizeChange={scrollToEnd}
             onLayout={scrollToEnd}
             ListEmptyComponent={
-              <View style={styles.center}>
-                <Text style={styles.emptyTitle}>💬 Сообщений пока нет</Text>
-                <Text style={styles.empty}>Напишите первым!</Text>
-              </View>
+              <EmptyState
+                iconName="chatbubble-outline"
+                title="Сообщений пока нет"
+                hint="Напишите первым — коллеги ответят"
+              />
             }
           />
         )}

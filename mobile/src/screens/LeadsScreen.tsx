@@ -32,6 +32,8 @@ import {
   queueLeadUpdate,
   useSyncState,
 } from "../sync";
+import { EmptyState } from "../components/EmptyState";
+import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 
 interface Props {
@@ -405,9 +407,7 @@ export function LeadsScreen({ token, onEdit }: Props) {
         </View>
       )}
       {loading && leads.length === 0 ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={colors.primary} />
-        </View>
+        <ListSkeleton />
       ) : error ? (
         <View style={styles.center}>
           <Text style={styles.error}>{error}</Text>
@@ -429,9 +429,11 @@ export function LeadsScreen({ token, onEdit }: Props) {
             />
           }
           ListEmptyComponent={
-            <View style={styles.center}>
-              <Text style={styles.empty}>Заявок пока нет</Text>
-            </View>
+            <EmptyState
+              iconName="clipboard-outline"
+              title="Заявок пока нет"
+              hint="Новые заявки с сайта появятся здесь автоматически"
+            />
           }
         />
       )}
@@ -521,11 +523,12 @@ const styles = StyleSheet.create({
   cardDate: {
     color: colors.textMuted,
     fontSize: 11,
-    // Дата не должна сжиматься и уезжать за контейнер — пусть сжимается имя
-    flexShrink: 0,
+    // ЯВНАЯ ширина: в новой архитектуре RN (Fabric) текст без явной ширины
+    // измеряется усечённым и режется многоточием («09.09.26, 00:…»). Дата
+    // фиксированного формата (17 символов), ширины 116px хватает с запасом.
+    width: 116,
     textAlign: "right",
-    // Небольшой отступ от правого края — чтобы дата не прилипала и не уходила за контейнер
-    marginRight: 4,
+    flexShrink: 0,
   },
   cardRow: {
     flexDirection: "row",

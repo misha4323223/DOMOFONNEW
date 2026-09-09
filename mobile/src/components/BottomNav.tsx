@@ -8,6 +8,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { colors } from "../theme";
 
 /** Куда можно перейти из меню. */
@@ -19,24 +20,46 @@ export type NavTarget =
   | "reviews"
   | "content"
   | "scan"
-  | "add";
+  | "add"
+  | "about";
 
 interface Props {
   /** Какой таб сейчас активен (на fullscreen-экранах — null, бар скрыт). */
   active: "leads" | "chat" | "archive" | "more" | null;
   onNavigate: (target: NavTarget) => void;
   onLogout: () => void;
+  /** Сколько непрочитанных сообщений в чате (0 — бейдж скрыт). */
+  chatUnread?: number;
 }
 
-/** Пункты шторки «Ещё». */
-const MORE_ITEMS: { target: NavTarget; icon: string; label: string }[] = [
-  { target: "scan", icon: "📷", label: "Блокнот" },
-  { target: "notes", icon: "📝", label: "Заметки" },
-  { target: "reviews", icon: "⭐", label: "Отзывы" },
-  { target: "content", icon: "🌐", label: "Сайт" },
+/** Конфигурация табов нижней навигации. */
+const TABS: {
+  target: NavTarget;
+  tabKey: "leads" | "chat" | "archive" | "more";
+  iconName: keyof typeof Ionicons.glyphMap;
+  label: string;
+}[] = [
+  { target: "leads", tabKey: "leads", iconName: "clipboard-outline", label: "Заявки" },
+  { target: "chat", tabKey: "chat", iconName: "chatbubble-outline", label: "Чат" },
+  { target: "archive", tabKey: "archive", iconName: "archive-outline", label: "Архив" },
+  { target: "leads", tabKey: "more", iconName: "menu", label: "Ещё" },
 ];
 
-export function BottomNav({ active, onNavigate, onLogout }: Props) {
+/** Пункты шторки «Ещё». */
+const MORE_ITEMS: {
+  target: NavTarget;
+  iconName: keyof typeof Ionicons.glyphMap;
+  label: string;
+  tint?: string;
+}[] = [
+  { target: "scan", iconName: "camera-outline", label: "Блокнот" },
+  { target: "notes", iconName: "document-text-outline", label: "Заметки" },
+  { target: "reviews", iconName: "star-outline", label: "Отзывы" },
+  { target: "content", iconName: "globe-outline", label: "Сайт" },
+  { target: "about", iconName: "information-circle-outline", label: "О приложении" },
+];
+
+export function BottomNav({ active, onNavigate, onLogout, chatUnread = 0 }: Props) {
   const insets = useSafeAreaInsets();
   const [sheetOpen, setSheetOpen] = useState(false);
 
@@ -67,25 +90,32 @@ export function BottomNav({ active, onNavigate, onLogout }: Props) {
     onNavigate(target);
   };
 
-  const tab = (
-    target: NavTarget,
-    tabKey: "leads" | "chat" | "archive" | "more",
-    icon: string,
-    label: string,
-  ) => {
-    const isActive = active === tabKey;
+  const renderTab = (t: (typeof TABS)[number]) => {
+    const isActive = active === t.tabKey;
     return (
       <Pressable
-        key={tabKey}
-        onPress={() => (tabKey === "more" ? setSheetOpen(true) : go(target))}
+        key={t.tabKey}
+        onPress={() => (t.tabKey === "more" ? setSheetOpen(true) : go(t.target))}
         style={styles.tab}
         hitSlop={4}
       >
         <View style={[styles.tabIconWrap, isActive && styles.tabIconWrapActive]}>
-          <Text style={styles.tabIcon}>{icon}</Text>
+          <Ionicons
+            name={t.iconName}
+            size={22}
+            color={isActive ? colors.primary : colors.textMuted}
+          />
+          {/* Бейдж непрочитанных сообщений на табе «Чат» */}
+          {t.tabKey === "chat" && chatUnread > 0 ? (
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>
+                {chatUnread > 99 ? "99+" : chatUnread}
+              </Text>
+            </View>
+          ) : null}
         </View>
         <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>
-          {label}
+          {t.label}
         </Text>
       </Pressable>
     );
@@ -99,19 +129,15 @@ export function BottomNav({ active, onNavigate, onLogout }: Props) {
           { paddingBottom: Math.max(insets.bottom, 8) },
         ]}
       >
-        {tab("leads", "leads", "📋", "Заявки")}
-        {tab("chat", "chat", "💬", "Чат")}
+        {TABS.map(renderTab)}
 
         {/* Центральная кнопка «+» — новая заявка */}
         <Pressable onPress={() => go("add")} style={styles.fabWrap} hitSlop={4}>
           <View style={styles.fab}>
-            <Text style={styles.fabIcon}>+</Text>
+            <Ionicons name="add" size={28} color={colors.primaryForeground} />
           </View>
           <Text style={styles.fabLabel}>Добавить</Text>
         </Pressable>
-
-        {tab("archive", "archive", "🗄", "Архив")}
-        {tab("leads", "more", "☰", "Ещё")}
       </View>
 
       {/* Шторка «Ещё» */}
@@ -161,7 +187,11 @@ export function BottomNav({ active, onNavigate, onLogout }: Props) {
                   ]}
                 >
                   <View style={styles.sheetItemIcon}>
-                    <Text style={styles.sheetItemIconText}>{item.icon}</Text>
+                    <Ionicons
+                      name={item.iconName}
+                      size={22}
+                      color={item.tint ?? colors.text}
+                    />
                   </View>
                   <Text style={styles.sheetItemLabel}>{item.label}</Text>
                 </Pressable>
@@ -181,7 +211,7 @@ export function BottomNav({ active, onNavigate, onLogout }: Props) {
               ]}
             >
               <View style={[styles.sheetItemIcon, styles.logoutIcon]}>
-                <Text style={styles.sheetItemIconText}>🚪</Text>
+                <Ionicons name="log-out-outline" size={20} color={colors.destructive} />
               </View>
               <Text style={styles.logoutLabel}>Выйти</Text>
             </Pressable>
@@ -200,7 +230,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.cardBorder,
     paddingTop: 8,
-    paddingHorizontal: 8,
+    paddingHorizontal: 4,
   },
   tab: {
     flex: 1,
@@ -208,17 +238,34 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   tabIconWrap: {
-    width: 40,
-    height: 28,
-    borderRadius: 14,
+    width: 42,
+    height: 30,
+    borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
   },
   tabIconWrapActive: {
     backgroundColor: "rgba(245, 162, 11, 0.16)",
   },
-  tabIcon: {
-    fontSize: 18,
+  // Бейдж непрочитанных: красный кружок с числом, поверх иконки чата
+  badge: {
+    position: "absolute",
+    top: -4,
+    right: -6,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.destructive,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: colors.card,
+  },
+  badgeText: {
+    color: "#ffffff",
+    fontSize: 10,
+    fontWeight: "800",
   },
   tabLabel: {
     color: colors.textMuted,
@@ -235,24 +282,18 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   fab: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
     backgroundColor: colors.primary,
     alignItems: "center",
     justifyContent: "center",
     marginTop: -22,
     shadowColor: colors.primary,
     shadowOpacity: 0.45,
-    shadowRadius: 10,
+    shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
     elevation: 8,
-  },
-  fabIcon: {
-    color: colors.primaryForeground,
-    fontSize: 30,
-    fontWeight: "700",
-    lineHeight: 32,
   },
   fabLabel: {
     color: colors.textMuted,
@@ -291,29 +332,26 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   sheetList: {
-    gap: 4,
+    gap: 2,
   },
   sheetItem: {
     flexDirection: "row",
     alignItems: "center",
     gap: 14,
-    paddingVertical: 10,
-    paddingHorizontal: 6,
+    paddingVertical: 11,
+    paddingHorizontal: 8,
     borderRadius: 14,
   },
   sheetItemPressed: {
     backgroundColor: colors.inputBg,
   },
   sheetItemIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: colors.inputBg,
     alignItems: "center",
     justifyContent: "center",
-  },
-  sheetItemIconText: {
-    fontSize: 20,
   },
   sheetItemLabel: {
     color: colors.text,

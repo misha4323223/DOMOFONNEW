@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ActivityIndicator, AppState, StyleSheet, View } from "react-native";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { ActivityIndicator, Animated, AppState, StyleSheet, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
@@ -15,10 +15,12 @@ import { NotesScreen } from "./src/screens/NotesScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ReviewsScreen } from "./src/screens/ReviewsScreen";
 import { ArchiveScreen } from "./src/screens/ArchiveScreen";
+import { AboutScreen } from "./src/screens/AboutScreen";
 import { api, type Lead, type LeadCandidate } from "./src/api";
 import { flushPending } from "./src/sync";
 import { colors } from "./src/theme";
 import { BottomNav, type NavTarget } from "./src/components/BottomNav";
+import { getChatLastSeen, markChatRead } from "./src/unread";
 
 const TOKEN_KEY = "admin_token";
 
@@ -41,13 +43,18 @@ type Screen =
   | { name: "notes" }
   | { name: "chat" }
   | { name: "reviews" }
-  | { name: "archive" };
+  | { name: "archive" }
+  | { name: "about" };
 
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [screen, setScreen] = useState<Screen>({ name: "leads" });
   const [reloadKey, setReloadKey] = useState(0);
+  // Счётчик непрочитанных сообщений чата (бейдж на табе «Чат»)
+  const [chatUnread, setChatUnread] = useState(0);
+  // Плавное появление экрана при переключении табов
+  const fade = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     (async () => {
@@ -98,6 +105,8 @@ export default function App() {
       if (data?.screen === "reviews") {
         setScreen({ name: "reviews" });
       } else if (data?.screen === "chat") {
+        // Тап по уведомлению открыл чат — якорь прочтения
+        // обновит сам экран чата
         setScreen({ name: "chat" });
       } else if (data?.screen === "leads") {
         setScreen({ name: "leads" });
@@ -133,6 +142,95 @@ export default function App() {
     setScreen({ name: "leads" });
   };
 
+  // Считаем непрочитанные: сообщения чата, созданные после якоря прочтения
+  // (серверное время последнего увиденного сообщения). Пока чат открыт —
+  // опросом занимается сам экран чата.
+  const pollChatUnread = useCallback(async () => {
+    if (!token) return;
+    try {
+      const anchor = await getChatLastSeen();
+      if (!anchor) {
+        // Первый запуск (или чат ни разу не открывали): считаем всю историю
+        // прочитанной. Якорь берём у СЕРВЕРА (createdAt последнего сообщения),
+        // чтобы часы телефона не влияли на счётчик.
+        const all = await api.chatMessages(token);
+        if (all && all.length > 0) {
+          await markChatRead(all[all.length - 1].createdAt);
+        } else {
+          // Сообщений нет — якорь на «сейчас»: первое же новое сообщение
+          // будет новее него и попадёт в счётчик
+          await markChatRead(new Date().toISOString());
+        }
+        return;
+      }
+      const data = await api.chatMessages(token, anchor);
+      setChatUnread(data && data.length > 0 ? Math.min(data.length, 99) : 0);
+    } catch {
+      // Офлайн — счётчик остаётся как есть
+    }
+  }, [token]);
+
+  // Начальный опрос: при первой загрузке токена считаем непрочитанные.
+  // (Интервал ниже подхватит дальнейшие обновления.)
+  const didInitPoll = useRef(false);
+  useEffect(() => {
+    if (token && !didInitPoll.current) {
+      didInitPoll.current = true;
+      pollChatUnread();
+    }
+  }, [token, pollChatUnread]);
+
+  // Опрос счётчика непрочитанных: каждые 10 секунд, пока чат не открыт.
+  // НЕ вызываем pollChatUnread() немедленно — это вызывает гонку с эффектом
+  // «выход из чата»: интервал читает старый якорь и показывает бейдж,
+  // который тут же обнуляется эффектом выхода.
+  useEffect(() => {
+    if (!token || screen.name === "chat") return;
+    const interval = setInterval(pollChatUnread, 10_000);
+    return () => clearInterval(interval);
+  }, [token, screen.name, pollChatUnread]);
+
+  // При выходе из чата: быстрый финальный запрос, чтобы захватить
+  // сообщения, пришедшие между последним опросом чата и уходом.
+  // Если пользователь БЫЛ в чате — он их видел, значит помечаем
+  // как прочитанные (якорь = максимальный createdAt).
+  const prevScreenRef = useRef<Screen["name"]>(screen.name);
+  useEffect(() => {
+    const prev = prevScreenRef.current;
+    prevScreenRef.current = screen.name;
+    if (prev === "chat" && screen.name !== "chat" && token) {
+      (async () => {
+        try {
+          const anchor = await getChatLastSeen();
+          if (anchor) {
+            const data = await api.chatMessages(token, anchor);
+            if (data && data.length > 0) {
+              // Сообщения пришли пока пользователь был в чате —
+              // он их видел, якорь移到 их максимальный createdAt
+              await markChatRead(data[data.length - 1].createdAt);
+            }
+          } else {
+            // Якоря нет — ставим на «сейчас»
+            await markChatRead(new Date().toISOString());
+          }
+        } catch {
+          // Offline — оставляем якорь как есть
+        }
+        pollChatUnread();
+      })();
+    }
+  }, [screen.name, pollChatUnread]);
+
+  // Плавный fade при смене экрана (переключение табов и открытие экранов)
+  useEffect(() => {
+    fade.setValue(0);
+    Animated.timing(fade, {
+      toValue: 1,
+      duration: 180,
+      useNativeDriver: true,
+    }).start();
+  }, [screen.name, fade]);
+
   // Нижний таб-бар виден на основных экранах; fullscreen-экраны
   // (форма, блокнот, разбор распознанного) открываются поверх без бара.
   const showNav =
@@ -141,7 +239,8 @@ export default function App() {
     screen.name === "archive" ||
     screen.name === "notes" ||
     screen.name === "reviews" ||
-    screen.name === "content";
+    screen.name === "content" ||
+    screen.name === "about";
   const activeTab =
     screen.name === "leads"
       ? ("leads" as const)
@@ -160,7 +259,12 @@ export default function App() {
         setScreen({ name: "scan" });
         break;
       case "chat":
+        // Открыли чат — бейдж НЕ обнуляем: он обновится сам, когда
+        // ChatScreen обновит якорь прочтения, и исчезнет при выходе.
         setScreen({ name: "chat" });
+        break;
+      case "about":
+        setScreen({ name: "about" });
         break;
       case "archive":
         setScreen({ name: "archive" });
@@ -268,6 +372,13 @@ export default function App() {
         />
       </View>
     );
+  } else if (screen.name === "about") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <AboutScreen onBack={() => setScreen({ name: "leads" })} />
+      </View>
+    );
   } else if (screen.name === "review") {
     content = (
       <View style={styles.root}>
@@ -300,12 +411,15 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <View style={styles.root}>
-        {content}
+        <Animated.View style={[styles.root, { opacity: fade }]}>
+          {content}
+        </Animated.View>
         {showNav && (
           <BottomNav
             active={activeTab}
             onNavigate={handleNavigate}
             onLogout={handleLogout}
+            chatUnread={chatUnread}
           />
         )}
       </View>

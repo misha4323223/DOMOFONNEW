@@ -8,6 +8,7 @@ import {
   Platform,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -31,6 +32,8 @@ import {
   useSyncState,
 } from "../sync";
 import { getMyProfile } from "../profile";
+import { EmptyState } from "../components/EmptyState";
+import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 
 interface Props {
@@ -66,6 +69,8 @@ export function NotesScreen({ token, onBack }: Props) {
   // Редактирование заметки (модалка)
   const [editing, setEditing] = useState<Note | null>(null);
   const [editText, setEditText] = useState("");
+  // Модалка привязки заметки к заявке
+  const [linking, setLinking] = useState<Note | null>(null);
 
   const { pending: pendingCount, revision } = useSyncState();
 
@@ -211,6 +216,34 @@ export function NotesScreen({ token, onBack }: Props) {
     }
   };
 
+  /** Привязать заметку к заявке (или отвязать, leadId = null). */
+  const setNoteLead = async (note: Note, leadId: string | null) => {
+    setLinking(null);
+    setNotes((prev) =>
+      prev.map((n) => (n.id === note.id ? { ...n, leadId } : n)),
+    );
+    try {
+      await api.updateNote(token, note.id, { leadId });
+    } catch (e) {
+      if (isNetworkError(e) || isServerError(e)) {
+        // Нет связи — привязка уйдёт в офлайн-очередь
+        await queueNoteUpdate(note.id, { leadId });
+        setIsOffline(true);
+      } else {
+        setNotes((prev) =>
+          prev.map((n) => (n.id === note.id ? { ...n, leadId: note.leadId } : n)),
+        );
+        Alert.alert(
+          "Ошибка",
+          e instanceof Error ? e.message : "Не удалось привязать заметку",
+        );
+      }
+    }
+  };
+
+  /** Активные заявки (без архива) для выбора при привязке. */
+  const activeLeads = leads.filter((l) => l.archived !== "1");
+
   const confirmDelete = (note: Note) => {
     Alert.alert("Удалить заметку?", note.text, [
       { text: "Отмена", style: "cancel" },
@@ -253,6 +286,24 @@ export function NotesScreen({ token, onBack }: Props) {
             ]}
           >
             {item.done === "1" ? "✓" : ""}
+          </Text>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [
+            styles.pinButton,
+            item.leadId && styles.pinButtonActive,
+            pressed && { opacity: 0.8 },
+          ]}
+          onPress={() => setLinking(item)}
+          hitSlop={8}
+        >
+          <Text
+            style={[
+              styles.pinButtonText,
+              item.leadId && styles.pinButtonTextActive,
+            ]}
+          >
+            {item.leadId ? "📌 Изменить" : "📌 Привязать"}
           </Text>
         </Pressable>
         <Pressable
@@ -333,9 +384,7 @@ export function NotesScreen({ token, onBack }: Props) {
         </View>
 
         {loading && notes.length === 0 ? (
-          <View style={styles.center}>
-            <ActivityIndicator size="large" color={colors.primary} />
-          </View>
+          <ListSkeleton />
         ) : (
           <FlatList
             data={notes}
@@ -350,13 +399,91 @@ export function NotesScreen({ token, onBack }: Props) {
               />
             }
             ListEmptyComponent={
-              <View style={styles.center}>
-                <Text style={styles.empty}>Заметок пока нет</Text>
-              </View>
+              <EmptyState
+                iconName="document-text-outline"
+                title="Заметок пока нет"
+                hint="Запишите сюда, что нужно не забыть — например, что взять с собой на заявку"
+              />
             }
           />
         )}
       </KeyboardAvoidingView>
+
+      {/* Модалка привязки к заявке */}
+      <Modal
+        visible={linking !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setLinking(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>
+              Привязать к заявке
+            </Text>
+            <Text style={styles.modalHint}>
+              {linking ? `«${linking.text.slice(0, 40)}${linking.text.length > 40 ? "…" : ""}»` : ""}
+            </Text>
+            {activeLeads.length === 0 ? (
+              <Text style={styles.empty}>Активных заявок нет</Text>
+            ) : (
+              <ScrollView style={styles.linkList}>
+                {activeLeads.map((l) => {
+                  const active = linking?.leadId === l.id;
+                  return (
+                    <Pressable
+                      key={l.id}
+                      style={[
+                        styles.linkRow,
+                        active && styles.linkRowActive,
+                      ]}
+                      onPress={() => linking && setNoteLead(linking, l.id)}
+                    >
+                      <Text
+                        style={[
+                          styles.linkRowName,
+                          active && styles.linkRowNameActive,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {active ? "✓ " : ""}
+                        {l.name}
+                      </Text>
+                      <Text style={styles.linkRowAddr} numberOfLines={1}>
+                        📍 {l.address}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            )}
+            <View style={styles.modalActions}>
+              {linking?.leadId ? (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.modalButton,
+                    styles.modalButtonDanger,
+                    pressed && { opacity: 0.85 },
+                  ]}
+                  onPress={() => linking && setNoteLead(linking, null)}
+                >
+                  <Text style={styles.modalButtonText}>Отвязать</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  styles.modalButtonGhost,
+                  pressed && { opacity: 0.85 },
+                ]}
+                onPress={() => setLinking(null)}
+              >
+                <Text style={styles.modalButtonTextGhost}>Закрыть</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Модалка редактирования */}
       <Modal
@@ -540,6 +667,27 @@ const styles = StyleSheet.create({
   checkboxTextDone: {
     color: "#22c55e",
   },
+  pinButton: {
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    backgroundColor: colors.inputBg,
+    marginTop: 1,
+  },
+  pinButtonActive: {
+    borderColor: "#f5a20b",
+    backgroundColor: "rgba(245,162,11,0.12)",
+  },
+  pinButtonText: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  pinButtonTextActive: {
+    color: "#f5a20b",
+  },
   cardBody: {
     flex: 1,
     gap: 4,
@@ -596,6 +744,41 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 17,
     fontWeight: "700",
+  },
+  modalHint: {
+    color: colors.textMuted,
+    fontSize: 13,
+  },
+  linkList: {
+    maxHeight: 300,
+    gap: 8,
+  },
+  linkRow: {
+    backgroundColor: colors.inputBg,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 2,
+  },
+  linkRowActive: {
+    borderColor: "#f5a20b",
+    backgroundColor: "rgba(245,162,11,0.12)",
+  },
+  linkRowName: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: "700",
+    flex: 1,
+  },
+  linkRowNameActive: {
+    color: "#f5a20b",
+  },
+  linkRowAddr: {
+    color: colors.textMuted,
+    fontSize: 12,
+    flex: 1,
   },
   modalInput: {
     backgroundColor: colors.inputBg,

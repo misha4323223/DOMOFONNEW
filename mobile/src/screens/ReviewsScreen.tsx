@@ -16,6 +16,8 @@ import {
   type Review,
   type ReviewStatus,
 } from "../api";
+import { EmptyState } from "../components/EmptyState";
+import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 
 interface Props {
@@ -227,9 +229,7 @@ export function ReviewsScreen({ token, onBack }: Props) {
       </View>
 
       {reviews === null && !error ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={colors.primary} />
-        </View>
+        <ListSkeleton />
       ) : error ? (
         <View style={styles.center}>
           <Text style={styles.error}>{error}</Text>
@@ -251,12 +251,10 @@ export function ReviewsScreen({ token, onBack }: Props) {
             />
           }
           ListEmptyComponent={
-            <View style={styles.center}>
-              <Text style={styles.empty}>Отзывов пока нет</Text>
-              <Text style={styles.emptyHint}>
-                Клиенты оставляют их прямо на сайте — в блоке «Отзывы»
-              </Text>
-            </View>
+            <EmptyState                iconName="star-outline"
+              title="Отзывов пока нет"
+              hint="Клиенты оставляют их прямо на сайте — в блоке «Отзывы»"
+            />
           }
         />
       )}
