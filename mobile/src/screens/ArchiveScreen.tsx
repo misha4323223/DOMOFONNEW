@@ -136,32 +136,30 @@ export function ArchiveScreen({ token, onBack }: Props) {
   };
 
   const renderCard = ({ item }: { item: Lead }) => (
-    <View style={styles.card}>
+    <View style={[styles.card, { borderLeftColor: "#22c55e" }]}>
       <View style={styles.cardHeader}>
         <Text style={styles.cardName}>{item.name}</Text>
         <View style={styles.doneBadge}>
           <Text style={styles.doneBadgeText}>✓ Выполнена</Text>
         </View>
       </View>
+      <Text style={styles.cardAddress}>📍 {item.address}</Text>
       <View style={styles.cardRow}>
-        <Text style={styles.cardLabel}>📞 </Text>
-        {item.phone ? (
-          <Text style={styles.cardPhone}>{item.phone}</Text>
-        ) : (
-          <Text style={styles.cardPhoneMissing}>Без телефона</Text>
-        )}
-      </View>
-      <View style={styles.chipRow}>
-        <View style={styles.chip}>
-          <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
-        </View>
+        <Text
+          style={[styles.cardPhone, !item.phone && styles.cardPhoneMissing]}
+          numberOfLines={1}
+        >
+          {item.phone ? `📞 ${item.phone}` : "📞 Без телефона"}
+        </Text>
         <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
       </View>
-      <Text style={styles.cardAddress}>📍 {item.address}</Text>
       {item.comment ? (
         <Text style={styles.cardComment}>💬 {item.comment}</Text>
       ) : null}
       <View style={styles.cardFooter}>
+        <View style={styles.chip}>
+          <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
+        </View>
         {busyId === item.id ? (
           <ActivityIndicator size="small" color={colors.primary} />
         ) : (
@@ -293,17 +291,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   list: {
-    padding: 16,
-    gap: 12,
+    padding: 14,
+    gap: 10,
     flexGrow: 1,
   },
   card: {
     backgroundColor: colors.card,
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    padding: 16,
-    gap: 6,
+    // Зелёная полоска слева — карточка из архива (выполнена)
+    borderLeftWidth: 4,
+    borderLeftColor: "#22c55e",
+    padding: 12,
+    gap: 5,
   },
   cardHeader: {
     flexDirection: "row",
@@ -313,63 +314,61 @@ const styles = StyleSheet.create({
   },
   cardName: {
     color: colors.text,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
+    // flex: 1 даёт тексту доступную ширину — имя переносится целиком,
+    // а не сжимается в „…“ (баг Fabric с голым flexShrink)
     flex: 1,
   },
   doneBadge: {
     backgroundColor: "rgba(34,197,94,0.15)",
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    borderRadius: 7,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
     borderWidth: 1,
     borderColor: "#22c55e",
   },
   doneBadgeText: {
     color: "#4ade80",
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "700",
   },
   cardRow: {
     flexDirection: "row",
     alignItems: "center",
-  },
-  cardLabel: {
-    fontSize: 14,
+    gap: 8,
+    marginTop: 2,
   },
   cardPhone: {
     color: colors.primary,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "700",
+    flex: 1,
   },
   cardPhoneMissing: {
     color: colors.destructive,
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  chipRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    flexWrap: "wrap",
   },
   chip: {
     alignSelf: "flex-start",
     backgroundColor: colors.inputBg,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    borderRadius: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     borderWidth: 1,
     borderColor: colors.cardBorder,
   },
   chipText: {
     color: colors.textMuted,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "600",
   },
   cardDate: {
     color: colors.textMuted,
-    fontSize: 12,
+    fontSize: 11,
+    flexShrink: 0,
+    textAlign: "right",
+    // Небольшой отступ от правого края — чтобы дата не прилипала и не уходила за контейнер
+    marginRight: 4,
   },
   cardAddress: {
     color: colors.text,
@@ -380,11 +379,14 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   cardFooter: {
-    marginTop: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 6,
     borderTopWidth: 1,
     borderTopColor: colors.cardBorder,
-    paddingTop: 10,
-    minHeight: 34,
+    paddingTop: 8,
   },
   cardActions: {
     flexDirection: "row",

@@ -6,13 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "runtimeVersion": {
-      "policy": "fingerprint"
-    },
-    "platforms": ["android", "ios"],
-    "fingerprint": {
-      "ignorePaths": ["android", "ios"]
-    },
+    "runtimeVersion": "a772a6b21e2389d8ea748177f1eae75a99887742",
     "updates": {
       "url": "https://u.expo.dev/01a13674-a633-47ca-ae30-865da95251c1",
       "checkAutomatically": "NEVER"
@@ -31,7 +25,8 @@
           "photosPermission": "Разрешите доступ к фото, чтобы заменить фото на сайте",
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-speech-recognition"
     ],
     "android": {
       "package": "ru.obzor71.admin",

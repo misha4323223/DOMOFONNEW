@@ -5,7 +5,6 @@ import {
   FlatList,
   Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -19,10 +18,13 @@ import {
   LEAD_STATUSES,
   cacheLeads,
   getCachedLeads,
+  cacheNotes,
+  getCachedNotes,
   isNetworkError,
   isServerError,
   type Lead,
   type LeadStatus,
+  type Note,
 } from "../api";
 import {
   flushPending,
@@ -34,15 +36,7 @@ import { colors } from "../theme";
 
 interface Props {
   token: string;
-  onLogout: () => void;
-  onAdd: () => void;
   onEdit: (lead: Lead) => void;
-  onScan: () => void;
-  onContent: () => void;
-  onNotes: () => void;
-  onChat: () => void;
-  onReviews: () => void;
-  onArchive: () => void;
 }
 
 function formatDate(iso: string): string {
@@ -85,19 +79,9 @@ async function registerPushToken(token: string) {
   }
 }
 
-export function LeadsScreen({
-  token,
-  onLogout,
-  onAdd,
-  onEdit,
-  onScan,
-  onContent,
-  onNotes,
-  onChat,
-  onReviews,
-  onArchive,
-}: Props) {
+export function LeadsScreen({ token, onEdit }: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,11 +105,17 @@ export function LeadsScreen({
       if (asRefresh) setRefreshing(true);
       setError(null);
       try {
-        const data = await api.leads(token);
+        // Заявки и заметки грузим вместе: заметки нужны для привязки к карточкам
+        const [data, notesData] = await Promise.all([
+          api.leads(token),
+          api.notes(token),
+        ]);
         setLeads(data ?? []);
+        setNotes(notesData ?? []);
         setIsOffline(false);
         // Сохраняем свежие данные в кеш
         await cacheLeads(data ?? []);
+        await cacheNotes(notesData ?? []);
         // Связь есть — проталкиваем накопленные офлайн-изменения
         await flushPending(token);
       } catch (e) {
@@ -135,7 +125,12 @@ export function LeadsScreen({
           setLeads(cached);
           setIsOffline(true);
           setError(null);
-        } else {
+        }
+        const cachedNotes = await getCachedNotes();
+        if (cachedNotes.length > 0) {
+          setNotes(cachedNotes);
+        }
+        if (cached.length === 0) {
           setError(e instanceof Error ? e.message : "Не удалось загрузить заявки");
         }
       } finally {
@@ -286,82 +281,108 @@ export function LeadsScreen({
     );
   };
 
-  const renderCard = ({ item }: { item: Lead }) => (
-    <Pressable
-      style={({ pressed }) => [
-        styles.card,
-        (item.status ?? "new") === "done" && styles.cardDone,
-        pressed && { opacity: 0.8 },
-      ]}
-      onPress={() => onEdit(item)}
-      onLongPress={() => confirmDelete(item)}
-      delayLongPress={500}
-    >
-      <View style={styles.cardHeader}>
-        <View style={styles.cardTitleWrap}>
-          <Text style={styles.cardName}>{item.name}</Text>
-          {item.source === "admin" && (
-            <View style={styles.manualBadge}>
-              <Text style={styles.manualBadgeText}>✍️ Вручную</Text>
-            </View>
+  /** Цвет боковой полоски карточки по статусу. */
+  const statusColor = (value: LeadStatus) => {
+    if (value === "urgent") return "#f87171";
+    if (value === "done") return "#22c55e";
+    return "#f5a20b";
+  };
+
+  const renderCard = ({ item }: { item: Lead }) => {
+    const status = item.status ?? "new";
+    // Актуальные (невыполненные) заметки, привязанные к этой заявке
+    const leadNotes = notes
+      .filter((n) => n.leadId === item.id && n.done !== "1")
+      .slice(0, 3);
+    const leadNotesTotal = notes.filter((n) => n.leadId === item.id && n.done !== "1").length;
+    return (
+      <Pressable
+        style={({ pressed }) => [
+          styles.card,
+          { borderLeftColor: statusColor(status) },
+          status === "done" && styles.cardDone,
+          pressed && { opacity: 0.8 },
+        ]}
+        onPress={() => onEdit(item)}
+        onLongPress={() => confirmDelete(item)}
+        delayLongPress={500}
+      >
+        <View style={styles.cardHeader}>
+          <View style={styles.cardTitleWrap}>
+            <Text style={styles.cardName}>{item.name}</Text>
+            {item.source === "admin" && (
+              <View style={styles.manualBadge}>
+                <Text style={styles.manualBadgeText}>✍️ Вручную</Text>
+              </View>
+            )}
+          </View>
+          <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
+        </View>
+        <Text style={styles.cardAddress}>📍 {item.address}</Text>
+        <View style={styles.cardRow}>
+          <Text
+            style={[styles.cardPhone, !item.phone && styles.cardPhoneMissing]}
+            numberOfLines={1}
+          >
+            {item.phone ? `📞 ${item.phone}` : "📞 Без телефона ⚠"}
+          </Text>
+          <View style={styles.chip}>
+            <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
+          </View>
+        </View>
+        {item.comment ? (
+          <Text style={styles.cardComment}>💬 {item.comment}</Text>
+        ) : null}
+        {leadNotes.length > 0 ? (
+          <View style={styles.notesBlock}>
+            {leadNotes.map((n) => (
+              <Text key={n.id} style={styles.cardNote} numberOfLines={1}>
+                📌 {n.text}
+              </Text>
+            ))}
+            {leadNotesTotal > leadNotes.length ? (
+              <Text style={styles.cardNoteMore}>
+                📌 ещё {leadNotesTotal - leadNotes.length}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+        <View style={styles.cardFooter}>
+          <View style={styles.statusRow}>
+            {LEAD_STATUSES.map((s) => {
+              const active = status === s.value;
+              return (
+                <Pressable
+                  key={s.value}
+                  onPress={() => changeStatus(item, s.value)}
+                  style={statusChipStyle(active, s.value)}
+                  hitSlop={6}
+                >
+                  <Text style={statusChipTextStyle(active, s.value)}>{s.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {status === "done" && (
+            <Pressable
+              style={({ pressed }) => [
+                styles.archiveButton,
+                pressed && { opacity: 0.8 },
+              ]}
+              onPress={() => confirmArchive(item)}
+              hitSlop={6}
+            >
+              <Text style={styles.archiveButtonText}>🗄 В архив</Text>
+            </Pressable>
           )}
         </View>
-        <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
-      </View>
-      <View style={styles.cardRow}>
-        <Text style={styles.cardLabel}>📞 </Text>
-        {item.phone ? (
-          <Text style={styles.cardPhone}>{item.phone}</Text>
-        ) : (
-          <Text style={styles.cardPhoneMissing}>Без телефона ⚠</Text>
-        )}
-      </View>
-      <View style={styles.chipRow}>
-        <View style={styles.chip}>
-          <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
-        </View>
-        <View style={styles.statusRow}>
-          {LEAD_STATUSES.map((s) => {
-            const active = (item.status ?? "new") === s.value;
-            return (
-              <Pressable
-                key={s.value}
-                onPress={() => changeStatus(item, s.value)}
-                style={statusChipStyle(active, s.value)}
-                hitSlop={6}
-              >
-                <Text style={statusChipTextStyle(active, s.value)}>{s.label}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
-      </View>
-      <Text style={styles.cardAddress}>📍 {item.address}</Text>
-      {item.comment ? (
-        <Text style={styles.cardComment}>💬 {item.comment}</Text>
-      ) : null}
-      <View style={styles.cardFooter}>
-        {(item.status ?? "new") === "done" && (
-          <Pressable
-            style={({ pressed }) => [
-              styles.archiveButton,
-              pressed && { opacity: 0.8 },
-            ]}
-            onPress={() => confirmArchive(item)}
-            hitSlop={6}
-          >
-            <Text style={styles.archiveButtonText}>🗄 В архив</Text>
-          </Pressable>
-        )}
-        <Text style={styles.cardHint}>Нажмите, чтобы редактировать · удерживайте для удаления</Text>
-      </View>
-    </Pressable>
-  );
+      </Pressable>
+    );
+  };
 
   return (
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
-        {/* Верхняя строка: заголовок слева, «Выйти» всегда справа */}
         <View style={styles.headerTop}>
           <View>
             <Text style={styles.headerTitle}>Заявки</Text>
@@ -369,44 +390,7 @@ export function LeadsScreen({
               {activeLeads.length > 0 ? `${activeLeads.length} шт.` : " "}
             </Text>
           </View>
-          <Pressable onPress={onLogout} hitSlop={12} style={styles.logoutButton}>
-            <Text style={styles.logout}>Выйти</Text>
-          </Pressable>
         </View>
-        {/* Кнопки действий: при нехватке ширины листаются вбок */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.headerActions}
-        >
-          <Pressable onPress={onNotes} hitSlop={12} style={styles.scanButton}>
-            <Text style={styles.scanButtonText}>📝 Заметки</Text>
-          </Pressable>
-          <Pressable onPress={onChat} hitSlop={12} style={styles.scanButton}>
-            <Text style={styles.scanButtonText}>💬 Чат</Text>
-          </Pressable>
-          <Pressable onPress={onContent} hitSlop={12} style={styles.scanButton}>
-            <Text style={styles.scanButtonText}>🌐 Сайт</Text>
-          </Pressable>
-          <Pressable onPress={onScan} hitSlop={12} style={styles.scanButton}>
-            <Text style={styles.scanButtonText}>📷 Блокнот</Text>
-          </Pressable>
-          <Pressable onPress={onReviews} hitSlop={12} style={styles.scanButton}>
-            <Text style={styles.scanButtonText}>⭐ Отзывы</Text>
-          </Pressable>
-          <Pressable onPress={onArchive} hitSlop={12} style={styles.scanButton}>
-            <Text style={styles.scanButtonText}>🗄 Архив</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [
-              styles.addButton,
-              pressed && { opacity: 0.85 },
-            ]}
-            onPress={onAdd}
-          >
-            <Text style={styles.addButtonText}>+ Добавить</Text>
-          </Pressable>
-        </ScrollView>
       </View>
 
       {/* Плашка офлайн-режима / ожидающих отправки изменений */}
@@ -464,7 +448,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 12,
-    gap: 10,
     borderBottomWidth: 1,
     borderBottomColor: colors.cardBorder,
     backgroundColor: colors.card,
@@ -483,60 +466,21 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 13,
   },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  logoutButton: {
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: colors.inputBg,
-  },
-  logout: {
-    color: colors.textMuted,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  scanButton: {
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    backgroundColor: colors.inputBg,
-  },
-  scanButtonText: {
-    color: colors.text,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  addButton: {
-    backgroundColor: colors.primary,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  addButtonText: {
-    color: colors.primaryForeground,
-    fontWeight: "700",
-    fontSize: 14,
-  },
   list: {
-    padding: 16,
-    gap: 12,
+    padding: 14,
+    gap: 10,
     flexGrow: 1,
   },
   card: {
     backgroundColor: colors.card,
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    padding: 16,
-    gap: 6,
+    // Цветная полоска слева показывает статус заявки
+    borderLeftWidth: 4,
+    borderLeftColor: "#f5a20b",
+    padding: 12,
+    gap: 5,
   },
   cardHeader: {
     flexDirection: "row",
@@ -549,70 +493,71 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     flex: 1,
+    // Явное сжатие: иначе при длинном имени/бейдже дата выталкивается за край карточки
+    flexShrink: 1,
   },
   cardName: {
     color: colors.text,
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: "700",
-    flexShrink: 1,
+    // flex: 1 (а не голый flexShrink) — имя получает доступную ширину и
+    // переносится целиком, а не сжимается в „…“ (баг Fabric), выталкивая дату
+    flex: 1,
   },
   // Метка «Вручную»: заявку добавил админ через «+ Добавить», а не клиент с сайта
   manualBadge: {
     backgroundColor: "rgba(245,162,11,0.14)",
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    borderRadius: 7,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
     borderWidth: 1,
     borderColor: "rgba(245,162,11,0.45)",
   },
   manualBadgeText: {
     color: "#f5a20b",
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "700",
   },
   cardDate: {
     color: colors.textMuted,
-    fontSize: 12,
+    fontSize: 11,
+    // Дата не должна сжиматься и уезжать за контейнер — пусть сжимается имя
+    flexShrink: 0,
+    textAlign: "right",
+    // Небольшой отступ от правого края — чтобы дата не прилипала и не уходила за контейнер
+    marginRight: 4,
   },
   cardRow: {
     flexDirection: "row",
     alignItems: "center",
-  },
-  cardLabel: {
-    fontSize: 14,
+    gap: 8,
+    marginTop: 2,
   },
   cardPhone: {
     color: colors.primary,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "700",
+    flex: 1,
   },
   cardPhoneMissing: {
     color: colors.destructive,
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  chipRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    flexWrap: "wrap",
   },
   chip: {
     alignSelf: "flex-start",
     backgroundColor: colors.inputBg,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    borderRadius: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     borderWidth: 1,
     borderColor: colors.cardBorder,
   },
   chipText: {
     color: colors.textMuted,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "600",
   },
   cardDone: {
-    opacity: 0.6,
+    opacity: 0.7,
   },
   statusRow: {
     flexDirection: "row",
@@ -659,35 +604,49 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 14,
   },
+  notesBlock: {
+    gap: 2,
+    marginTop: 2,
+  },
+  cardNote: {
+    color: "#f5a20b",
+    fontSize: 13,
+    fontWeight: "500",
+    flex: 1,
+  },
+  cardNoteMore: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: "600",
+    flex: 1,
+  },
   cardComment: {
     color: colors.textMuted,
     fontSize: 13,
   },
   cardFooter: {
-    marginTop: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 6,
     borderTopWidth: 1,
     borderTopColor: colors.cardBorder,
     paddingTop: 8,
-    gap: 8,
   },
   // Кнопка «В архив» на выполненных заявках
   archiveButton: {
-    alignSelf: "flex-start",
     borderWidth: 1,
-    borderColor: colors.cardBorder,
+    borderColor: "rgba(245,162,11,0.55)",
     borderRadius: 8,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 6,
-    backgroundColor: colors.inputBg,
+    backgroundColor: "rgba(245,162,11,0.14)",
   },
   archiveButtonText: {
-    color: colors.textMuted,
+    color: "#f5a20b",
     fontSize: 12,
     fontWeight: "700",
-  },
-  cardHint: {
-    color: colors.textMuted,
-    fontSize: 11,
   },
   offlineBanner: {
     backgroundColor: "rgba(245,158,11,0.15)",

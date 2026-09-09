@@ -166,6 +166,7 @@ async function ensureTables(): Promise<void> {
           done Utf8 NOT NULL,
           createdAt Utf8 NOT NULL,
           updatedAt Utf8 NOT NULL,
+          leadId Utf8,
           PRIMARY KEY (id)
         )
       `;
@@ -177,9 +178,26 @@ async function ensureTables(): Promise<void> {
           text Utf8 NOT NULL,
           createdAt Utf8 NOT NULL,
           editedAt Utf8,
+          image Utf8,
           PRIMARY KEY (id)
         )
       `;
+      // Для таблиц, созданных до появления фото: добавляем колонку.
+      // Колонка уже существует — это нормально, пропускаем.
+      try {
+        await sql`ALTER TABLE ${sql.identifier(T.chat)} ADD COLUMN image Utf8`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/already exists|column.*exists/i.test(msg)) throw err;
+      }
+      // Привязка заметок к заявкам: колонка появилась позже создания таблицы.
+      // Колонка уже существует — это нормально, пропускаем.
+      try {
+        await sql`ALTER TABLE ${sql.identifier(T.notes)} ADD COLUMN leadId Utf8`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/already exists|column.*exists/i.test(msg)) throw err;
+      }
       await sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.reviews)} (
           id Utf8 NOT NULL,
@@ -509,11 +527,14 @@ export interface Note {
   done: string;
   createdAt: string;
   updatedAt: string;
+  /** id заявки, к которой привязана заметка; null — общая заметка. */
+  leadId: string | null;
 }
 
 export interface NoteInput {
   text: string;
   author: string;
+  leadId?: string | null;
 }
 
 export type NotePatch = Partial<NoteInput> & { done?: string };
@@ -529,10 +550,11 @@ export async function createYdbNote(input: NoteInput): Promise<Note> {
     done: "0",
     createdAt: now,
     updatedAt: now,
+    leadId: input.leadId ?? null,
   };
   await sql`
-    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt)
-    VALUES (${note.id}, ${note.text}, ${note.author}, ${note.done}, ${note.createdAt}, ${note.updatedAt})
+    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
+    VALUES (${note.id}, ${note.text}, ${note.author}, ${note.done}, ${note.createdAt}, ${note.updatedAt}, ${optStr(note.leadId)})
   `;
   return note;
 }
@@ -541,7 +563,7 @@ export async function listYdbNotes(): Promise<Note[]> {
   await ensureTables();
   const sql = await getSql();
   const result = await sql`
-    SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)}
+    SELECT id, text, author, done, createdAt, updatedAt, leadId FROM ${sql.identifier(T.notes)}
   `;
   return ((result[0] ?? []) as Row[])
     .map((row) => ({
@@ -551,6 +573,7 @@ export async function listYdbNotes(): Promise<Note[]> {
       done: row.done === "1" ? "1" : "0",
       createdAt: str(row, "createdAt"),
       updatedAt: str(row, "updatedAt"),
+      leadId: row.leadId == null ? null : str(row, "leadId"),
     }))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -562,7 +585,7 @@ export async function updateYdbNote(
   await ensureTables();
   const sql = await getSql();
   const result = await sql`
-    SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)} WHERE id = ${id}
+    SELECT id, text, author, done, createdAt, updatedAt, leadId FROM ${sql.identifier(T.notes)} WHERE id = ${id}
   `;
   const row = (result[0] ?? [])[0] as Row | undefined;
   if (!row) return undefined;
@@ -573,11 +596,17 @@ export async function updateYdbNote(
     done: row.done === "1" ? "1" : "0",
     createdAt: str(row, "createdAt"),
     updatedAt: str(row, "updatedAt"),
+    leadId: row.leadId == null ? null : str(row, "leadId"),
   };
-  const updated: Note = { ...current, ...patch, updatedAt: new Date().toISOString() };
+  const updated: Note = {
+    ...current,
+    ...patch,
+    leadId: patch.leadId === undefined ? current.leadId : patch.leadId,
+    updatedAt: new Date().toISOString(),
+  };
   await sql`
-    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt)
-    VALUES (${updated.id}, ${updated.text}, ${updated.author}, ${updated.done}, ${updated.createdAt}, ${updated.updatedAt})
+    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
+    VALUES (${updated.id}, ${updated.text}, ${updated.author}, ${updated.done}, ${updated.createdAt}, ${updated.updatedAt}, ${optStr(updated.leadId)})
   `;
   return updated;
 }
@@ -587,6 +616,22 @@ export async function deleteYdbNote(id: string): Promise<boolean> {
   const sql = await getSql();
   await sql`DELETE FROM ${sql.identifier(T.notes)} WHERE id = ${id}`;
   return true;
+}
+
+/** Отвязать от заявки все её заметки (при удалении заявки). */
+export async function unlinkYdbNotesByLead(leadId: string): Promise<void> {
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)} WHERE leadId = ${leadId}
+  `;
+  const rows = (result[0] ?? []) as Row[];
+  for (const row of rows) {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
+      VALUES (${str(row, "id")}, ${str(row, "text")}, ${str(row, "author")}, ${str(row, "done")}, ${str(row, "createdAt")}, ${str(row, "updatedAt")}, ${optStr(null)})
+    `;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -602,12 +647,16 @@ export interface ChatMessage {
   createdAt: string;
   /** Если сообщение было отредактировано. */
   editedAt?: string;
+  /** Фото в сообщении (data-url jpeg/png/webp, сжатое приложением). */
+  image?: string;
 }
 
 export interface ChatMessageInput {
   sender: string;
   address: string;
   text: string;
+  /** Необязательное фото (data-url). */
+  image?: string;
 }
 
 export async function sendYdbChatMessage(input: ChatMessageInput): Promise<ChatMessage> {
@@ -619,10 +668,12 @@ export async function sendYdbChatMessage(input: ChatMessageInput): Promise<ChatM
     address: input.address ?? "",
     text: input.text,
     createdAt: new Date().toISOString(),
+    ...(input.image ? { image: input.image } : {}),
   };
   await sql`
-    UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt)
-    VALUES (${message.id}, ${message.sender}, ${message.address}, ${message.text}, ${message.createdAt})
+    UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt, image)
+    VALUES (${message.id}, ${message.sender}, ${message.address}, ${message.text},
+            ${message.createdAt}, ${optStr(message.image ?? null)})
   `;
   return message;
 }
@@ -634,7 +685,7 @@ export async function listYdbChatMessages(
   await ensureTables();
   const sql = await getSql();
   const result = await sql`
-    SELECT id, sender, address, text, createdAt, editedAt FROM ${sql.identifier(T.chat)}
+    SELECT id, sender, address, text, createdAt, editedAt, image FROM ${sql.identifier(T.chat)}
     ORDER BY createdAt
   `;
   const all = ((result[0] ?? []) as Row[]).map((row) => ({
@@ -644,6 +695,7 @@ export async function listYdbChatMessages(
     text: str(row, "text"),
     createdAt: str(row, "createdAt"),
     editedAt: row.editedAt == null ? undefined : str(row, "editedAt"),
+    image: row.image == null ? undefined : str(row, "image"),
   }));
   const filtered = after ? all.filter((m) => m.createdAt > after) : all;
   // Возвращаем последние `limit` сообщений (по возрастанию времени).
@@ -657,7 +709,7 @@ export async function updateYdbChatMessage(
   await ensureTables();
   const sql = await getSql();
   const result = await sql`
-    SELECT id, sender, address, text, createdAt, editedAt FROM ${sql.identifier(T.chat)} WHERE id = ${id}
+    SELECT id, sender, address, text, createdAt, editedAt, image FROM ${sql.identifier(T.chat)} WHERE id = ${id}
   `;
   const row = (result[0] ?? [])[0] as Row | undefined;
   if (!row) return undefined;
@@ -668,6 +720,7 @@ export async function updateYdbChatMessage(
     text: str(row, "text"),
     createdAt: str(row, "createdAt"),
     editedAt: row.editedAt == null ? undefined : str(row, "editedAt"),
+    image: row.image == null ? undefined : str(row, "image"),
   };
   const updated: ChatMessage = {
     ...current,
@@ -675,8 +728,9 @@ export async function updateYdbChatMessage(
     editedAt: new Date().toISOString(),
   };
   await sql`
-    UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt, editedAt)
-    VALUES (${updated.id}, ${updated.sender}, ${updated.address}, ${updated.text}, ${updated.createdAt}, ${updated.editedAt})
+    UPSERT INTO ${sql.identifier(T.chat)} (id, sender, address, text, createdAt, editedAt, image)
+    VALUES (${updated.id}, ${updated.sender}, ${updated.address}, ${updated.text},
+            ${updated.createdAt}, ${updated.editedAt}, ${optStr(updated.image ?? null)})
   `;
   return updated;
 }

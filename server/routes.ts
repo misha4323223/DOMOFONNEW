@@ -373,6 +373,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.delete("/api/leads/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
     const deleted = await storage.deleteLead(req.params.id);
+    if (deleted) {
+      // Удаляем заявку — привязанные заметки остаются, но отвязываются
+      await storage.unlinkNotesByLead(req.params.id);
+    }
     return deleted ? res.status(204).send() : res.status(404).json({ message: "Заявка не найдена" });
   }));
 
@@ -436,7 +440,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (text.length > NOTE_TEXT_MAX_LENGTH) {
       return res.status(400).json({ message: "Заметка слишком длинная" });
     }
-    const note = await storage.createNote({ text, author: cleanName(req.body?.author) });
+    const leadId =
+      req.body?.leadId === null
+        ? null
+        : typeof req.body?.leadId === "string" && req.body.leadId.trim()
+          ? req.body.leadId.trim()
+          : undefined;
+    const note = await storage.createNote({
+      text,
+      author: cleanName(req.body?.author),
+      ...(leadId !== undefined ? { leadId } : {}),
+    });
     return res.status(201).json(note);
   }));
 
@@ -459,6 +473,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (req.body?.author !== undefined) {
       patch.author = cleanName(req.body.author);
     }
+    // Привязка к заявке: строка — привязать, null — отвязать.
+    if (req.body?.leadId !== undefined) {
+      patch.leadId =
+        req.body.leadId === null
+          ? null
+          : typeof req.body.leadId === "string" && req.body.leadId.trim()
+            ? req.body.leadId.trim()
+            : null;
+    }
     const note = await storage.updateNote(req.params.id, patch);
     return note ? res.json(note) : res.status(404).json({ message: "Заметка не найдена" });
   }));
@@ -476,18 +499,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.json(messages);
   }));
 
+  // Фото в чате: сжатый data-url jpeg/png/webp. Лимит ~300 КБ base64
+  // (у записи YDB свой лимит ~400 КБ, запас на остальные поля).
+  const MAX_CHAT_IMAGE_LENGTH = 300_000;
+  const CHAT_IMAGE_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+
   app.post("/api/chat/messages", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
     const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
-    if (!text) {
-      return res.status(400).json({ message: "Введите текст сообщения" });
+    const image = typeof req.body?.image === "string" ? req.body.image.trim() : "";
+    if (!text && !image) {
+      return res.status(400).json({ message: "Введите текст сообщения или прикрепите фото" });
     }
     if (text.length > CHAT_TEXT_MAX_LENGTH) {
       return res.status(400).json({ message: "Сообщение слишком длинное" });
+    }
+    if (image) {
+      if (image.length > MAX_CHAT_IMAGE_LENGTH) {
+        return res.status(400).json({ message: "Фото слишком большое — прикрепите файл поменьше" });
+      }
+      if (!CHAT_IMAGE_DATA_URL_RE.test(image)) {
+        return res.status(400).json({ message: "Некорректное изображение" });
+      }
     }
     const message = await storage.sendChatMessage({
       sender: cleanName(req.body?.sender),
       address: typeof req.body?.address === "string" ? req.body.address.trim() : "",
       text,
+      image: image || undefined,
     });
     // Push на телефоны админов (пожаробезопасно: ошибка не ломает отправку
     // сообщения — оно уже сохранено). Тап по уведомлению открывает чат.

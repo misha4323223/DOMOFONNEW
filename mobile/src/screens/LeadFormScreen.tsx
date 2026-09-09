@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -15,13 +16,17 @@ import {
   api,
   SERVICES,
   LEAD_STATUSES,
+  cacheNotes,
+  getCachedNotes,
   isNetworkError,
   isServerError,
   type Lead,
   type LeadInput,
   type LeadStatus,
+  type Note,
 } from "../api";
-import { queueLeadCreate, queueLeadUpdate } from "../sync";
+import { queueLeadCreate, queueLeadUpdate, queueNoteCreate } from "../sync";
+import { getMyProfile } from "../profile";
 import { colors } from "../theme";
 
 interface Props {
@@ -40,6 +45,36 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
   const [status, setStatus] = useState<LeadStatus>(lead?.status ?? "new");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Заметки, привязанные к заявке (только при редактировании)
+  const [leadNotes, setLeadNotes] = useState<Note[]>([]);
+  const [noteInput, setNoteInput] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
+
+  // Подгружаем привязанные заметки при открытии формы редактирования
+  useEffect(() => {
+    if (!lead) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.notes(token);
+        if (!cancelled) {
+          setLeadNotes(
+            (data ?? []).filter((n) => n.leadId === lead.id),
+          );
+        }
+        await cacheNotes(data ?? []);
+      } catch {
+        const cached = await getCachedNotes();
+        if (!cancelled) {
+          setLeadNotes(cached.filter((n) => n.leadId === lead.id));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [lead, token]);
 
   const save = async () => {
     if (!name.trim() || !phone.trim() || !address.trim()) {
@@ -94,6 +129,90 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
   // Новая заявка всегда ручная; клиентские заявки с сайта — по полю source.
   const isCityField = !lead || lead.source === "admin";
 
+  /** Добавить заметку, привязанную к заявке. */
+  const addLeadNote = async () => {
+    const text = noteInput.trim();
+    if (!text || !lead || noteBusy) return;
+    setNoteBusy(true);
+    setNoteInput("");
+    const now = new Date().toISOString();
+    const clientId = `local-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    const profile = await getMyProfile();
+    const local: Note = {
+      id: clientId,
+      text,
+      author: profile.city || "Админ",
+      done: "0",
+      createdAt: now,
+      updatedAt: now,
+      leadId: lead.id,
+    };
+    // Оптимистично добавляем сразу
+    setLeadNotes((prev) => [local, ...prev]);
+    try {
+      const created = await api.createNote(
+        token,
+        text,
+        profile.city || "Админ",
+        lead.id,
+      );
+      setLeadNotes((prev) =>
+        prev.map((n) => (n.id === clientId ? { ...created } : n)),
+      );
+    } catch (e) {
+      if (isNetworkError(e) || isServerError(e)) {
+        // Нет связи — заметка уйдёт в офлайн-очередь
+        await queueNoteCreate(
+          clientId,
+          { text, author: profile.city || "Админ", leadId: lead.id },
+          local,
+        );
+      } else {
+        setLeadNotes((prev) => prev.filter((n) => n.id !== clientId));
+        Alert.alert(
+          "Ошибка",
+          e instanceof Error ? e.message : "Не удалось добавить заметку",
+        );
+      }
+    } finally {
+      setNoteBusy(false);
+    }
+  };
+
+  /** Выполнено / не выполнено. */
+  const toggleLeadNote = async (note: Note) => {
+    const next = note.done === "1" ? "0" : "1";
+    setLeadNotes((prev) =>
+      prev.map((n) => (n.id === note.id ? { ...n, done: next } : n)),
+    );
+    try {
+      await api.updateNote(token, note.id, { done: next });
+    } catch {
+      // Не критично: при следующей загрузке заметок состояние придёт с сервера
+    }
+  };
+
+  /** Отвязать заметку от заявки. */
+  const detachLeadNote = (note: Note) => {
+    Alert.alert("Отвязать заметку?", note.text, [
+      { text: "Отмена", style: "cancel" },
+      {
+        text: "Отвязать",
+        style: "destructive",
+        onPress: async () => {
+          setLeadNotes((prev) => prev.filter((n) => n.id !== note.id));
+          try {
+            await api.updateNote(token, note.id, { leadId: null });
+          } catch {
+            // При ошибке сети заметка останется привязанной до следующей синхронизации
+          }
+        },
+      },
+    ]);
+  };
+
   return (
     <SafeAreaView style={styles.root}>
       <KeyboardAvoidingView
@@ -115,23 +234,27 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           keyboardShouldPersistTaps="handled"
         >
         <Text style={styles.label}>{isCityField ? "Город" : "Имя"}</Text>
-        <TextInput
-          style={styles.input}
-          value={name}
-          onChangeText={setName}
-          placeholder={isCityField ? "Например: Богородицк" : "Как зовут клиента"}
-          placeholderTextColor={colors.textMuted}
-        />
+        <View style={styles.fieldRow}>
+          <TextInput
+            style={[styles.input, styles.inputFlex]}
+            value={name}
+            onChangeText={setName}
+            placeholder={isCityField ? "Например: Богородицк" : "Как зовут клиента"}
+            placeholderTextColor={colors.textMuted}
+          />
+        </View>
 
         <Text style={styles.label}>Телефон</Text>
-        <TextInput
-          style={styles.input}
-          value={phone}
-          onChangeText={setPhone}
-          placeholder="+7 ___ ___-__-__"
-          placeholderTextColor={colors.textMuted}
-          keyboardType="phone-pad"
-        />
+        <View style={styles.fieldRow}>
+          <TextInput
+            style={[styles.input, styles.inputFlex]}
+            value={phone}
+            onChangeText={setPhone}
+            placeholder="+7 ___ ___-__-__"
+            placeholderTextColor={colors.textMuted}
+            keyboardType="phone-pad"
+          />
+        </View>
 
         <Text style={styles.label}>Услуга</Text>
         <View style={styles.services}>
@@ -157,23 +280,30 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
         </View>
 
         <Text style={styles.label}>Адрес</Text>
-        <TextInput
-          style={styles.input}
-          value={address}
-          onChangeText={setAddress}
-          placeholder="г. Тула, ул. ..."
-          placeholderTextColor={colors.textMuted}
-        />
+        <View style={styles.fieldRow}>
+          <TextInput
+            style={[styles.input, styles.inputFlex]}
+            value={address}
+            onChangeText={setAddress}
+            placeholder="г. Тула, ул. ..."
+            placeholderTextColor={colors.textMuted}
+          />
+        </View>
 
         <Text style={styles.label}>Комментарий</Text>
-        <TextInput
-          style={[styles.input, styles.multiline]}
-          value={comment}
-          onChangeText={setComment}
-          placeholder="Детали заявки (необязательно)"
-          placeholderTextColor={colors.textMuted}
-          multiline
-        />
+        <View style={styles.fieldRow}>
+          <TextInput              style={[
+                styles.input,
+                styles.multiline,
+                styles.inputFlex,
+              ]}
+            value={comment}
+            onChangeText={setComment}
+            placeholder="Детали заявки (необязательно)"
+            placeholderTextColor={colors.textMuted}
+            multiline
+          />
+        </View>
 
         {lead ? (
           <>
@@ -201,6 +331,67 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
                   </Pressable>
                 );
               })}
+            </View>
+          </>
+        ) : null}
+
+        {lead ? (
+          <>
+            <Text style={styles.label}>📌 Заметки к заявке</Text>
+            <Text style={styles.notesHint}>
+              Например: «взять изоленту» — будет видно и в карточке заявки
+            </Text>
+            {leadNotes.map((n) => (
+              <View key={n.id} style={styles.noteRow}>
+                <Pressable
+                  onPress={() => toggleLeadNote(n)}
+                  hitSlop={8}
+                  style={[
+                    styles.noteCheckbox,
+                    n.done === "1" && styles.noteCheckboxDone,
+                  ]}
+                >
+                  <Text style={styles.noteCheckboxText}>
+                    {n.done === "1" ? "✓" : ""}
+                  </Text>
+                </Pressable>
+                <Text
+                  style={[
+                    styles.noteText,
+                    n.done === "1" && styles.noteTextDone,
+                  ]}
+                >
+                  {n.text}
+                </Text>
+                <Pressable onPress={() => detachLeadNote(n)} hitSlop={8}>
+                  <Text style={styles.noteRemove}>✕</Text>
+                </Pressable>
+              </View>
+            ))}
+            <View style={styles.fieldRow}>
+              <TextInput
+                style={[styles.input, styles.inputFlex]}
+                value={noteInput}
+                onChangeText={setNoteInput}
+                placeholder="Новая заметка к заявке…"
+                placeholderTextColor={colors.textMuted}
+                onSubmitEditing={addLeadNote}
+                returnKeyType="done"
+              />
+              <Pressable
+                style={({ pressed }) => [
+                  styles.noteAddButton,
+                  pressed && { opacity: 0.85 },
+                ]}
+                onPress={addLeadNote}
+                disabled={noteBusy}
+              >
+                {noteBusy ? (
+                  <ActivityIndicator color={colors.primaryForeground} size="small" />
+                ) : (
+                  <Text style={styles.noteAddButtonText}>＋</Text>
+                )}
+              </Pressable>
             </View>
           </>
         ) : null}
@@ -280,6 +471,76 @@ const styles = StyleSheet.create({
   multiline: {
     minHeight: 80,
     textAlignVertical: "top",
+  },
+  notesHint: {
+    color: colors.textMuted,
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  noteRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.inputBg,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 6,
+  },
+  noteCheckbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: colors.cardBorder,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  noteCheckboxDone: {
+    backgroundColor: "#22c55e",
+    borderColor: "#22c55e",
+  },
+  noteCheckboxText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  noteText: {
+    color: colors.text,
+    fontSize: 14,
+    flex: 1,
+  },
+  noteTextDone: {
+    textDecorationLine: "line-through",
+    color: colors.textMuted,
+  },
+  noteRemove: {
+    color: colors.destructive,
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  noteAddButton: {
+    backgroundColor: colors.primary,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  noteAddButtonText: {
+    color: colors.primaryForeground,
+    fontSize: 20,
+    fontWeight: "800",
+  },
+  fieldRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  inputFlex: {
+    flex: 1,
   },
   services: {
     flexDirection: "row",

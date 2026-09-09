@@ -119,8 +119,18 @@ export async function notifyNewReview(review: Review): Promise<void> {
  */
 export async function notifyChatMessage(message: ChatMessage): Promise<void> {
   const title = `💬 ${message.sender}`;
-  const preview =
-    message.text.length > 90 ? `${message.text.slice(0, 90)}…` : message.text;
+  const hasPhoto = Boolean(message.image);
+  const textPreview = message.text
+    ? message.text.length > 90
+      ? `${message.text.slice(0, 90)}…`
+      : message.text
+    : "";
+  // Сообщение-фото без текста показываем как «📷 Фото»
+  const preview = textPreview
+    ? hasPhoto
+      ? `${textPreview} 📷`
+      : textPreview
+    : "📷 Фото";
   const body = message.address ? `${message.address}: ${preview}` : preview;
   await sendPush(title, body, { messageId: message.id, screen: "chat" });
 }

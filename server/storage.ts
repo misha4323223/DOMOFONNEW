@@ -12,6 +12,7 @@ import {
   listYdbNotes,
   updateYdbNote,
   deleteYdbNote,
+  unlinkYdbNotesByLead,
   sendYdbChatMessage,
   listYdbChatMessages,
   updateYdbChatMessage,
@@ -49,6 +50,8 @@ export interface IStorage {
   listNotes(): Promise<Note[]>;
   updateNote(id: string, patch: NotePatch): Promise<Note | undefined>;
   deleteNote(id: string): Promise<boolean>;
+  /** Отвязать от заявки все её заметки (при удалении заявки). */
+  unlinkNotesByLead(leadId: string): Promise<void>;
   sendChatMessage(message: ChatMessageInput): Promise<ChatMessage>;
   listChatMessages(after?: string): Promise<ChatMessage[]>;
   updateChatMessage(id: string, patch: { text?: string }): Promise<ChatMessage | undefined>;
@@ -151,9 +154,20 @@ export class MemStorage implements IStorage {
       done: "0",
       createdAt: now,
       updatedAt: now,
+      leadId: input.leadId ?? null,
     };
     this.notes.set(note.id, note);
     return note;
+  }
+
+  async unlinkNotesByLead(leadId: string): Promise<void> {
+    if (this.useYdb) return unlinkYdbNotesByLead(leadId);
+    for (const note of Array.from(this.notes.values())) {
+      if (note.leadId === leadId) {
+        note.leadId = null;
+        note.updatedAt = new Date().toISOString();
+      }
+    }
   }
 
   async listNotes(): Promise<Note[]> {
@@ -189,6 +203,7 @@ export class MemStorage implements IStorage {
       address: input.address ?? "",
       text: input.text,
       createdAt: new Date().toISOString(),
+      ...(input.image ? { image: input.image } : {}),
     };
     this.chat.set(message.id, message);
     return message;

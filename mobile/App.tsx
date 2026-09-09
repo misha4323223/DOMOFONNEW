@@ -18,6 +18,7 @@ import { ArchiveScreen } from "./src/screens/ArchiveScreen";
 import { api, type Lead, type LeadCandidate } from "./src/api";
 import { flushPending } from "./src/sync";
 import { colors } from "./src/theme";
+import { BottomNav, type NavTarget } from "./src/components/BottomNav";
 
 const TOKEN_KEY = "admin_token";
 
@@ -132,6 +133,52 @@ export default function App() {
     setScreen({ name: "leads" });
   };
 
+  // Нижний таб-бар виден на основных экранах; fullscreen-экраны
+  // (форма, блокнот, разбор распознанного) открываются поверх без бара.
+  const showNav =
+    screen.name === "leads" ||
+    screen.name === "chat" ||
+    screen.name === "archive" ||
+    screen.name === "notes" ||
+    screen.name === "reviews" ||
+    screen.name === "content";
+  const activeTab =
+    screen.name === "leads"
+      ? ("leads" as const)
+      : screen.name === "chat"
+        ? ("chat" as const)
+        : screen.name === "archive"
+          ? ("archive" as const)
+          : ("more" as const);
+
+  const handleNavigate = (target: NavTarget) => {
+    switch (target) {
+      case "add":
+        setScreen({ name: "form", lead: null });
+        break;
+      case "scan":
+        setScreen({ name: "scan" });
+        break;
+      case "chat":
+        setScreen({ name: "chat" });
+        break;
+      case "archive":
+        setScreen({ name: "archive" });
+        break;
+      case "notes":
+        setScreen({ name: "notes" });
+        break;
+      case "reviews":
+        setScreen({ name: "reviews" });
+        break;
+      case "content":
+        setScreen({ name: "content" });
+        break;
+      default:
+        setScreen({ name: "leads" });
+    }
+  };
+
   let content: ReactNode;
   if (loading) {
     content = (
@@ -158,7 +205,11 @@ export default function App() {
             setReloadKey((k) => k + 1);
             setScreen({ name: "leads" });
           }}
-          onBack={() => setScreen({ name: "leads" })}
+          onBack={() => {
+            // Перезагружаем список: в форме могли добавить привязанную заметку
+            setReloadKey((k) => k + 1);
+            setScreen({ name: "leads" });
+          }}
         />
       </View>
     );
@@ -240,21 +291,26 @@ export default function App() {
         <LeadsScreen
           key={reloadKey}
           token={token}
-          onLogout={handleLogout}
-          onAdd={() => setScreen({ name: "form", lead: null })}
           onEdit={(lead) => setScreen({ name: "form", lead })}
-          onScan={() => setScreen({ name: "scan" })}
-          onContent={() => setScreen({ name: "content" })}
-          onNotes={() => setScreen({ name: "notes" })}
-          onChat={() => setScreen({ name: "chat" })}
-          onReviews={() => setScreen({ name: "reviews" })}
-          onArchive={() => setScreen({ name: "archive" })}
         />
       </View>
     );
   }
 
-  return <SafeAreaProvider>{content}</SafeAreaProvider>;
+  return (
+    <SafeAreaProvider>
+      <View style={styles.root}>
+        {content}
+        {showNav && (
+          <BottomNav
+            active={activeTab}
+            onNavigate={handleNavigate}
+            onLogout={handleLogout}
+          />
+        )}
+      </View>
+    </SafeAreaProvider>
+  );
 }
 
 const styles = StyleSheet.create({

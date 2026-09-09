@@ -20,6 +20,7 @@ import {
   getCachedNotes,
   isNetworkError,
   isServerError,
+  type Lead,
   type Note,
 } from "../api";
 import {
@@ -56,6 +57,7 @@ function formatDate(iso: string): string {
 
 export function NotesScreen({ token, onBack }: Props) {
   const [notes, setNotes] = useState<Note[]>([]);
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
@@ -85,8 +87,14 @@ export function NotesScreen({ token, onBack }: Props) {
     async (asRefresh = false) => {
       if (asRefresh) setRefreshing(true);
       try {
-        const data = await api.notes(token);
+        // Заметки и заявки грузим вместе: для привязанных заметок
+        // показываем, к какой заявке они относятся
+        const [data, leadsData] = await Promise.all([
+          api.notes(token),
+          api.leads(token),
+        ]);
         setNotes(data ?? []);
+        setLeads(leadsData ?? []);
         setIsOffline(false);
         await cacheNotes(data ?? []);
         await flushPending(token);
@@ -128,6 +136,7 @@ export function NotesScreen({ token, onBack }: Props) {
       done: "0",
       createdAt: now,
       updatedAt: now,
+      leadId: null,
     };
     // Оптимистично добавляем сразу
     setNotes((prev) => [local, ...prev]);
@@ -261,6 +270,13 @@ export function NotesScreen({ token, onBack }: Props) {
           >
             {item.text}
           </Text>
+          {item.leadId ? (
+            <Text style={styles.cardLead} numberOfLines={1}>
+              📌 к заявке:{" "}
+              {leads.find((l) => l.id === item.leadId)?.name ??
+                "заявка удалена"}
+            </Text>
+          ) : null}
           <Text style={styles.cardMeta}>
             {item.author} · {formatDate(item.createdAt)}
           </Text>
@@ -536,6 +552,13 @@ const styles = StyleSheet.create({
   cardTextDone: {
     color: colors.textMuted,
     textDecorationLine: "line-through",
+  },
+  cardLead: {
+    color: "#f5a20b",
+    fontSize: 12,
+    fontWeight: "600",
+    marginTop: 2,
+    flex: 1,
   },
   cardMeta: {
     color: colors.textMuted,

@@ -213,10 +213,13 @@ export const api = {
 
   notes: (token: string) => request("/api/notes", { token }) as Promise<Note[]>,
 
-  createNote: (token: string, text: string, author: string) =>
+  createNote: (token: string, text: string, author: string, leadId?: string | null) =>
     request("/api/notes", {
       method: "POST",
-      body: { text, author },
+      body:
+        leadId !== undefined
+          ? { text, author, leadId }
+          : { text, author },
       token,
     }) as Promise<Note>,
 
@@ -251,10 +254,10 @@ export const api = {
     request(
       `/api/chat/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`,
       { token },
-    ) as Promise<ChatMessage[]>,  sendChatMessage: (token: string, text: string, sender: string) =>
+    ) as Promise<ChatMessage[]>,  sendChatMessage: (token: string, text: string, sender: string, image?: string) =>
     request("/api/chat/messages", {
       method: "POST",
-      body: { text, sender },
+      body: image ? { text, sender, image } : { text, sender },
       token,
     }) as Promise<ChatMessage>,
 
@@ -311,11 +314,14 @@ export interface Note {
   done: string;
   createdAt: string;
   updatedAt: string;
+  /** id заявки, к которой привязана заметка; null — общая заметка. */
+  leadId: string | null;
 }
 
 export interface NoteInput {
   text: string;
   author: string;
+  leadId?: string | null;
 }
 
 export type NotePatch = Partial<NoteInput> & { done?: string };
@@ -348,6 +354,8 @@ export interface ChatMessage {
   text: string;
   createdAt: string;
   editedAt?: string;
+  /** Фото в сообщении (data-url jpeg/png/webp). */
+  image?: string;
 }
 
 export interface LeadCandidate {
