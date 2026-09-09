@@ -128,7 +128,20 @@ async function ensureTables(): Promise<void> {
   if (!tablesReady) {
     tablesReady = (async () => {
       const sql = await getSql();
-      await sql`
+      // Каждый шаг — в отдельном try/catch: одна неудачная операция DDL
+      // не должна ронять весь сервер (все запросы к БД проходят через
+      // ensureTables). Ошибки логируем — по логам видно, что именно не удалось.
+      const step = async (
+        name: string,
+        fn: () => unknown,
+      ): Promise<void> => {
+        try {
+          await fn();
+        } catch (err) {
+          console.error(`[ydb] Не удалось выполнить «${name}»:`, err);
+        }
+      };
+      await step("create leads", () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.leads)} (
           id Utf8 NOT NULL,
           name Utf8 NOT NULL,
@@ -142,23 +155,23 @@ async function ensureTables(): Promise<void> {
           createdAt Utf8 NOT NULL,
           PRIMARY KEY (id)
         )
-      `;
-      await sql`
+      `);
+      await step("create devices", () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.devices)} (
           token Utf8 NOT NULL,
           registeredAt Utf8 NOT NULL,
           PRIMARY KEY (token)
         )
-      `;
-      await sql`
+      `);
+      await step("create settings", () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.settings)} (
           key Utf8 NOT NULL,
           value Utf8 NOT NULL,
           updatedAt Utf8 NOT NULL,
           PRIMARY KEY (key)
         )
-      `;
-      await sql`
+      `);
+      await step("create notes", () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.notes)} (
           id Utf8 NOT NULL,
           text Utf8 NOT NULL,
@@ -169,8 +182,8 @@ async function ensureTables(): Promise<void> {
           leadId Utf8,
           PRIMARY KEY (id)
         )
-      `;
-      await sql`
+      `);
+      await step("create chat", () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.chat)} (
           id Utf8 NOT NULL,
           sender Utf8 NOT NULL,
@@ -181,24 +194,21 @@ async function ensureTables(): Promise<void> {
           image Utf8,
           PRIMARY KEY (id)
         )
-      `;
+      `);
       // Для таблиц, созданных до появления фото: добавляем колонку.
       // Колонка уже существует — это нормально, пропускаем.
-      try {
-        await sql`ALTER TABLE ${sql.identifier(T.chat)} ADD COLUMN image Utf8`;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!/already exists|column.*exists/i.test(msg)) throw err;
-      }
+      await step("alter chat add image", () =>
+        sql`ALTER TABLE ${sql.identifier(T.chat)} ADD COLUMN image Utf8`,
+      );
       // Привязка заметок к заявкам: колонка появилась позже создания таблицы.
-      // Колонка уже существует — это нормально, пропускаем.
-      try {
-        await sql`ALTER TABLE ${sql.identifier(T.notes)} ADD COLUMN leadId Utf8`;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!/already exists|column.*exists/i.test(msg)) throw err;
-      }
-      await sql`
+      // Пробуем два синтаксиса — на случай, если первый не принимается.
+      await step("alter notes add leadId (Utf8)", () =>
+        sql`ALTER TABLE ${sql.identifier(T.notes)} ADD COLUMN leadId Utf8`,
+      );
+      await step("alter notes add leadId (Optional<Utf8>)", () =>
+        sql`ALTER TABLE ${sql.identifier(T.notes)} ADD COLUMN leadId Optional<Utf8>`,
+      );
+      await step("create reviews", () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.reviews)} (
           id Utf8 NOT NULL,
           name Utf8 NOT NULL,
@@ -209,7 +219,7 @@ async function ensureTables(): Promise<void> {
           createdAt Utf8 NOT NULL,
           PRIMARY KEY (id)
         )
-      `;
+      `);
       // Таблицы готовы — запускаем одноразовый перенос данных из старых
       // документных таблиц (не ждём: миграция идёт в фоне и повторяется
       // при следующем обращении, если вдруг не удалась).
@@ -552,30 +562,61 @@ export async function createYdbNote(input: NoteInput): Promise<Note> {
     updatedAt: now,
     leadId: input.leadId ?? null,
   };
-  await sql`
-    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
-    VALUES (${note.id}, ${note.text}, ${note.author}, ${note.done}, ${note.createdAt}, ${note.updatedAt}, ${optStr(note.leadId)})
-  `;
+  try {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
+      VALUES (${note.id}, ${note.text}, ${note.author}, ${note.done}, ${note.createdAt}, ${note.updatedAt}, ${optStr(note.leadId)})
+    `;
+  } catch {
+    // Колонки leadId нет в таблице — сохраняем заметку без привязки
+    note.leadId = null;
+    await sql`
+      UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt)
+      VALUES (${note.id}, ${note.text}, ${note.author}, ${note.done}, ${note.createdAt}, ${note.updatedAt})
+    `;
+  }
   return note;
 }
 
 export async function listYdbNotes(): Promise<Note[]> {
   await ensureTables();
   const sql = await getSql();
-  const result = await sql`
-    SELECT id, text, author, done, createdAt, updatedAt, leadId FROM ${sql.identifier(T.notes)}
-  `;
-  return ((result[0] ?? []) as Row[])
-    .map((row) => ({
-      id: str(row, "id"),
-      text: str(row, "text"),
-      author: str(row, "author"),
-      done: row.done === "1" ? "1" : "0",
-      createdAt: str(row, "createdAt"),
-      updatedAt: str(row, "updatedAt"),
-      leadId: row.leadId == null ? null : str(row, "leadId"),
-    }))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  let result;
+  try {
+    // Сначала пробуем с колонкой leadId; если её нет в таблице —
+    // возвращаем заметки без привязки (leadId: null)
+    result = await sql`
+      SELECT id, text, author, done, createdAt, updatedAt, leadId FROM ${sql.identifier(T.notes)}
+    `;
+    return ((result[0] ?? []) as Row[])
+      .map((row) => ({
+        id: str(row, "id"),
+        text: str(row, "text"),
+        author: str(row, "author"),
+        done: row.done === "1" ? "1" : "0",
+        createdAt: str(row, "createdAt"),
+        updatedAt: str(row, "updatedAt"),
+        leadId: row.leadId == null ? null : str(row, "leadId"),
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/column.*(leadId|not found)|no such column/i.test(msg)) throw err;
+    result = await sql`
+      SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)}
+    `;
+    return ((result[0] ?? []) as Row[])
+      .map((row) => ({
+        id: str(row, "id"),
+        text: str(row, "text"),
+        author: str(row, "author"),
+        done: row.done === "1" ? "1" : "0",
+        createdAt: str(row, "createdAt"),
+        updatedAt: str(row, "updatedAt"),
+        leadId: null,
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
 }
 
 export async function updateYdbNote(
@@ -584,12 +625,42 @@ export async function updateYdbNote(
 ): Promise<Note | undefined> {
   await ensureTables();
   const sql = await getSql();
+  let current: Note | undefined;
+  try {
+    current = await readNoteRow(id);
+  } catch {
+    // Колонки leadId нет в таблице — работаем без привязки
+    current = await readNoteRowLegacy(id);
+  }
+  if (!current) return undefined;
+  const updated: Note = {
+    ...current,
+    ...patch,
+    leadId: patch.leadId === undefined ? current.leadId : patch.leadId,
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
+      VALUES (${updated.id}, ${updated.text}, ${updated.author}, ${updated.done}, ${updated.createdAt}, ${updated.updatedAt}, ${optStr(updated.leadId)})
+    `;
+  } catch {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt)
+      VALUES (${updated.id}, ${updated.text}, ${updated.author}, ${updated.done}, ${updated.createdAt}, ${updated.updatedAt})
+    `;
+  }
+  return updated;
+}
+
+async function readNoteRow(id: string): Promise<Note | undefined> {
+  const sql = await getSql();
   const result = await sql`
     SELECT id, text, author, done, createdAt, updatedAt, leadId FROM ${sql.identifier(T.notes)} WHERE id = ${id}
   `;
   const row = (result[0] ?? [])[0] as Row | undefined;
   if (!row) return undefined;
-  const current: Note = {
+  return {
     id: str(row, "id"),
     text: str(row, "text"),
     author: str(row, "author"),
@@ -598,17 +669,24 @@ export async function updateYdbNote(
     updatedAt: str(row, "updatedAt"),
     leadId: row.leadId == null ? null : str(row, "leadId"),
   };
-  const updated: Note = {
-    ...current,
-    ...patch,
-    leadId: patch.leadId === undefined ? current.leadId : patch.leadId,
-    updatedAt: new Date().toISOString(),
-  };
-  await sql`
-    UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
-    VALUES (${updated.id}, ${updated.text}, ${updated.author}, ${updated.done}, ${updated.createdAt}, ${updated.updatedAt}, ${optStr(updated.leadId)})
+}
+
+async function readNoteRowLegacy(id: string): Promise<Note | undefined> {
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)} WHERE id = ${id}
   `;
-  return updated;
+  const row = (result[0] ?? [])[0] as Row | undefined;
+  if (!row) return undefined;
+  return {
+    id: str(row, "id"),
+    text: str(row, "text"),
+    author: str(row, "author"),
+    done: row.done === "1" ? "1" : "0",
+    createdAt: str(row, "createdAt"),
+    updatedAt: str(row, "updatedAt"),
+    leadId: null,
+  };
 }
 
 export async function deleteYdbNote(id: string): Promise<boolean> {
@@ -622,15 +700,19 @@ export async function deleteYdbNote(id: string): Promise<boolean> {
 export async function unlinkYdbNotesByLead(leadId: string): Promise<void> {
   await ensureTables();
   const sql = await getSql();
-  const result = await sql`
-    SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)} WHERE leadId = ${leadId}
-  `;
-  const rows = (result[0] ?? []) as Row[];
-  for (const row of rows) {
-    await sql`
-      UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
-      VALUES (${str(row, "id")}, ${str(row, "text")}, ${str(row, "author")}, ${str(row, "done")}, ${str(row, "createdAt")}, ${str(row, "updatedAt")}, ${optStr(null)})
+  try {
+    const result = await sql`
+      SELECT id, text, author, done, createdAt, updatedAt FROM ${sql.identifier(T.notes)} WHERE leadId = ${leadId}
     `;
+    const rows = (result[0] ?? []) as Row[];
+    for (const row of rows) {
+      await sql`
+        UPSERT INTO ${sql.identifier(T.notes)} (id, text, author, done, createdAt, updatedAt, leadId)
+        VALUES (${str(row, "id")}, ${str(row, "text")}, ${str(row, "author")}, ${str(row, "done")}, ${str(row, "createdAt")}, ${str(row, "updatedAt")}, ${optStr(null)})
+      `;
+    }
+  } catch {
+    // Колонки leadId нет — отвязывать нечего, пропускаем
   }
 }
 
