@@ -60,7 +60,10 @@ export interface IStorage {
   createReview(review: ReviewInput): Promise<Review>;
   listReviews(): Promise<Review[]>;
   listPublishedReviews(): Promise<Review[]>;
-  updateReview(id: string, patch: { status?: ReviewStatus }): Promise<Review | undefined>;
+  updateReview(
+    id: string,
+    patch: { status?: ReviewStatus; reply?: string },
+  ): Promise<Review | undefined>;
   deleteReview(id: string): Promise<boolean>;
 }
 
@@ -243,6 +246,7 @@ export class MemStorage implements IStorage {
       rating: input.rating,
       text: input.text,
       status: "new",
+      reply: "",
       createdAt: new Date().toISOString(),
     };
     this.reviews.set(review.id, review);
@@ -263,7 +267,7 @@ export class MemStorage implements IStorage {
 
   async updateReview(
     id: string,
-    patch: { status?: ReviewStatus },
+    patch: { status?: ReviewStatus; reply?: string },
   ): Promise<Review | undefined> {
     if (this.useYdb) return updateYdbReview(id, patch);
     const current = this.reviews.get(id);
@@ -271,6 +275,7 @@ export class MemStorage implements IStorage {
     const updated: Review = {
       ...current,
       status: patch.status ?? current.status,
+      reply: patch.reply ?? current.reply,
     };
     this.reviews.set(id, updated);
     return updated;

@@ -7,6 +7,7 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -55,6 +56,12 @@ export function ReviewsScreen({ token, onBack }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Развёрнутые отзывы: по умолчанию текст показываем компактно (3 строки)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // Ответ службы на отзыв
+  const [replyFor, setReplyFor] = useState<string | null>(null);
+  const [replyDraft, setReplyDraft] = useState("");
+  const [savingReply, setSavingReply] = useState(false);
 
   const load = useCallback(
     async (asRefresh = false) => {
@@ -88,7 +95,7 @@ export function ReviewsScreen({ token, onBack }: Props) {
     );
     setBusyId(review.id);
     try {
-      await api.updateReview(token, review.id, status);
+      await api.updateReview(token, review.id, { status });
       setError(null);
     } catch (e) {
       // Не получилось — откатываем и показываем ошибку
@@ -131,6 +138,36 @@ export function ReviewsScreen({ token, onBack }: Props) {
     );
   };
 
+  const openReply = (review: Review) => {
+    setReplyFor(review.id);
+    setReplyDraft(review.reply ?? "");
+  };
+
+  /** Сохранить ответ службы (пустая строка — убрать ответ). */
+  const saveReply = async (review: Review, value: string) => {
+    if (savingReply) return;
+    const reply = value.trim();
+    setSavingReply(true);
+    // Оптимистично показываем ответ сразу, при ошибке вернём данные с сервера
+    setReviews((list) =>
+      list ? list.map((r) => (r.id === review.id ? { ...r, reply } : r)) : list,
+    );
+    try {
+      await api.updateReview(token, review.id, { reply });
+      setReplyFor(null);
+      setReplyDraft("");
+      setError(null);
+    } catch (e) {
+      Alert.alert(
+        "Ошибка",
+        e instanceof Error ? e.message : "Не удалось сохранить ответ",
+      );
+      await load();
+    } finally {
+      setSavingReply(false);
+    }
+  };
+
   const statusBadgeStyle = (status: ReviewStatus) => {
     if (status === "published") return styles.statusPublished;
     if (status === "new") return styles.statusNew;
@@ -139,70 +176,176 @@ export function ReviewsScreen({ token, onBack }: Props) {
 
   const pending = reviews?.filter((r) => r.status === "new").length ?? 0;
 
-  const renderCard = ({ item }: { item: Review }) => (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <Text style={styles.cardName}>{item.name}</Text>
-        <View style={[styles.statusBadge, statusBadgeStyle(item.status)]}>
-          <Text style={styles.statusBadgeText}>
-            {reviewStatusLabel(item.status)}
-          </Text>
+  const renderCard = ({ item }: { item: Review }) => {
+    const hasReply = Boolean(item.reply?.trim());
+    const replyOpen = replyFor === item.id;
+    const isExpanded = Boolean(expanded[item.id]);
+
+    return (
+      <View style={styles.card}>
+        {/* Верх: имя, звёзды, статус — одной строкой */}
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardName}>{item.name}</Text>
+          <Stars rating={Number(item.rating) || 0} />
+          <View style={[styles.statusBadge, statusBadgeStyle(item.status)]}>
+            <Text style={styles.statusBadgeText}>
+              {reviewStatusLabel(item.status)}
+            </Text>
+          </View>
         </View>
-      </View>
-      <Stars rating={Number(item.rating) || 0} />
-      {item.city ? (
-        <Text style={styles.cardCity}>📍 {item.city}</Text>
-      ) : null}
-      <Text style={styles.cardText}>{item.text}</Text>
-      <View style={styles.cardFooter}>
-        <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
-        <View style={styles.cardActions}>
-          {busyId === item.id ? (
-            <ActivityIndicator size="small" color={colors.primary} />
-          ) : (
-            <>
-              {item.status !== "published" && (
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.actionButton,
-                    styles.actionPublish,
-                    pressed && { opacity: 0.8 },
-                  ]}
-                  onPress={() => setStatus(item, "published")}
-                  hitSlop={6}
-                >
-                  <Text style={styles.actionPublishText}>Опубликовать</Text>
-                </Pressable>
-              )}
-              {item.status !== "hidden" && (
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.actionButton,
-                    pressed && { opacity: 0.8 },
-                  ]}
-                  onPress={() => setStatus(item, "hidden")}
-                  hitSlop={6}
-                >
-                  <Text style={styles.actionText}>Скрыть</Text>
-                </Pressable>
-              )}
+
+        {/* Дата и город — мелкой строкой */}
+        <Text style={styles.cardMeta}>
+          {formatDate(item.createdAt)}
+          {item.city ? `  ·  📍 ${item.city}` : ""}
+        </Text>
+
+        {/* Текст отзыва: по умолчанию 3 строки — карточка компактная */}
+        <Text style={styles.cardText} numberOfLines={isExpanded ? undefined : 3}>
+          {item.text}
+        </Text>
+        {item.text.length > 140 ? (
+          <Pressable
+            onPress={() =>
+              setExpanded((prev) => ({ ...prev, [item.id]: !prev[item.id] }))
+            }
+            hitSlop={8}
+          >
+            <Text style={styles.moreText}>
+              {isExpanded ? "Свернуть" : "Читать полностью"}
+            </Text>
+          </Pressable>
+        ) : null}
+
+        {/* Уже сохранённый ответ службы */}
+        {hasReply && !replyOpen ? (
+          <View style={styles.replyBox}>
+            <Text style={styles.replyTitle}>Ответ службы</Text>
+            <Text style={styles.replyText}>{item.reply}</Text>
+          </View>
+        ) : null}
+
+        {/* Форма ответа */}
+        {replyOpen ? (
+          <View style={styles.replyForm}>
+            <TextInput
+              style={styles.replyInput}
+              value={replyDraft}
+              onChangeText={setReplyDraft}
+              placeholder="Ответ клиенту — появится под отзывом на сайте"
+              placeholderTextColor={colors.textMuted}
+              multiline
+              autoFocus
+              maxLength={1000}
+            />
+            <View style={styles.cardActions}>
               <Pressable
                 style={({ pressed }) => [
                   styles.actionButton,
-                  styles.actionDelete,
+                  styles.actionPublish,
                   pressed && { opacity: 0.8 },
                 ]}
-                onPress={() => confirmDelete(item)}
+                onPress={() => saveReply(item, replyDraft)}
+                disabled={savingReply}
                 hitSlop={6}
               >
-                <Text style={styles.actionDeleteText}>Удалить</Text>
+                <Text style={styles.actionPublishText}>
+                  {savingReply ? "Сохраняем…" : "Сохранить ответ"}
+                </Text>
               </Pressable>
-            </>
-          )}
-        </View>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  pressed && { opacity: 0.8 },
+                ]}
+                onPress={() => {
+                  setReplyFor(null);
+                  setReplyDraft("");
+                }}
+                hitSlop={6}
+              >
+                <Text style={styles.actionText}>Отмена</Text>
+              </Pressable>
+              {hasReply ? (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.actionButton,
+                    styles.actionDelete,
+                    pressed && { opacity: 0.8 },
+                  ]}
+                  onPress={() => saveReply(item, "")}
+                  disabled={savingReply}
+                  hitSlop={6}
+                >
+                  <Text style={styles.actionDeleteText}>Убрать ответ</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
+
+        {/* Действия */}
+        {busyId === item.id ? (
+          <ActivityIndicator
+            size="small"
+            color={colors.primary}
+            style={styles.cardBusy}
+          />
+        ) : (
+          <View style={styles.cardActions}>
+            {item.status !== "published" && (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  styles.actionPublish,
+                  pressed && { opacity: 0.8 },
+                ]}
+                onPress={() => setStatus(item, "published")}
+                hitSlop={6}
+              >
+                <Text style={styles.actionPublishText}>Опубликовать</Text>
+              </Pressable>
+            )}
+            {item.status !== "hidden" && (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  pressed && { opacity: 0.8 },
+                ]}
+                onPress={() => setStatus(item, "hidden")}
+                hitSlop={6}
+              >
+                <Text style={styles.actionText}>Скрыть</Text>
+              </Pressable>
+            )}
+            <Pressable
+              style={({ pressed }) => [
+                styles.actionButton,
+                pressed && { opacity: 0.8 },
+              ]}
+              onPress={() => openReply(item)}
+              hitSlop={6}
+            >
+              <Text style={styles.actionText}>
+                {hasReply ? "Изменить ответ" : "Ответить"}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.actionButton,
+                styles.actionDelete,
+                pressed && { opacity: 0.8 },
+              ]}
+              onPress={() => confirmDelete(item)}
+              hitSlop={6}
+            >
+              <Text style={styles.actionDeleteText}>Удалить</Text>
+            </Pressable>
+          </View>
+        )}
       </View>
-    </View>
-  );
+    );
+  };
 
   return (
     <SafeAreaView style={styles.root}>
@@ -310,37 +453,36 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(245,158,11,0.15)",
     borderRadius: 10,
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 6,
     borderWidth: 1,
     borderColor: "#f59e0b",
   },
   pendingText: {
     color: "#fbbf24",
-    fontSize: 13,
+    fontSize: 12.5,
     fontWeight: "700",
   },
   list: {
-    padding: 16,
-    gap: 12,
+    padding: 12,
+    gap: 10,
     flexGrow: 1,
   },
   card: {
     backgroundColor: colors.card,
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    padding: 16,
-    gap: 8,
+    padding: 12,
+    gap: 6,
   },
   cardHeader: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
     gap: 8,
   },
   cardName: {
     color: colors.text,
-    fontSize: 17,
+    fontSize: 15,
     fontWeight: "700",
     flex: 1,
   },
@@ -369,45 +511,84 @@ const styles = StyleSheet.create({
   },
   stars: {
     color: "#fbbf24",
-    fontSize: 16,
-    letterSpacing: 1,
+    fontSize: 13,
+    letterSpacing: 0.5,
+    flexShrink: 0,
   },
   starsEmpty: {
     color: colors.textMuted,
     opacity: 0.35,
   },
-  cardCity: {
+  cardMeta: {
     color: colors.textMuted,
-    fontSize: 13,
+    fontSize: 11,
   },
   cardText: {
     color: colors.text,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 13.5,
+    lineHeight: 19,
   },
-  cardFooter: {
+  moreText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: "700",
     marginTop: 2,
-    borderTopWidth: 1,
-    borderTopColor: colors.cardBorder,
-    paddingTop: 10,
+  },
+  replyBox: {
+    marginTop: 4,
+    borderLeftWidth: 2,
+    borderLeftColor: colors.primary,
+    backgroundColor: colors.inputBg,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    gap: 2,
+  },
+  replyTitle: {
+    color: colors.primary,
+    fontSize: 10,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  replyText: {
+    color: colors.text,
+    fontSize: 12.5,
+    lineHeight: 17,
+  },
+  replyForm: {
+    marginTop: 4,
     gap: 8,
   },
-  cardDate: {
-    color: colors.textMuted,
-    fontSize: 12,
+  replyInput: {
+    backgroundColor: colors.inputBg,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    color: colors.text,
+    fontSize: 13.5,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    minHeight: 64,
+    textAlignVertical: "top",
+  },
+  cardBusy: {
+    alignSelf: "flex-start",
+    marginTop: 4,
   },
   cardActions: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
-    gap: 8,
-    minHeight: 30,
+    gap: 6,
+    marginTop: 2,
   },
   actionButton: {
     borderWidth: 1,
     borderColor: colors.cardBorder,
     borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
     backgroundColor: colors.inputBg,
   },
   actionPublish: {

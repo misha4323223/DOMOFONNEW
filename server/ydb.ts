@@ -841,6 +841,8 @@ export interface Review {
   /** Текст отзыва. */
   text: string;
   status: ReviewStatus;
+  /** Ответ службы на отзыв; пустая строка — ответа нет. */
+  reply: string;
   createdAt: string;
 }
 
@@ -849,6 +851,57 @@ export interface ReviewInput {
   city: string;
   rating: string;
   text: string;
+}
+
+// --- Ответы службы на отзывы -----------------------------------------------
+// Храним их в key/value таблице настроек (yql_settings) одним JSON-объектом:
+//   ключ "review-replies" → { "<id отзыва>": "текст ответа" }
+// Так для ответов НЕ нужна новая колонка в таблице отзывов: ALTER TABLE на
+// проде применяется не всегда (из-за этого уже был инцидент с падением БД),
+// а настройки работают сразу. Плата — одно чтение настроек при выдаче списка.
+const REVIEW_REPLIES_KEY = "review-replies";
+
+/** Читаем все ответы одним объектом (битый JSON — считаем, что ответов нет). */
+async function readReviewReplies(): Promise<Record<string, string>> {
+  try {
+    const setting = await getYdbSetting(REVIEW_REPLIES_KEY);
+    if (!setting?.value) return {};
+    const parsed: unknown = JSON.parse(setting.value);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, string> = {};
+    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "string" && value) out[id] = value;
+    }
+    return out;
+  } catch (err) {
+    console.error("[ydb] Не удалось прочитать ответы на отзывы:", err);
+    return {};
+  }
+}
+
+/** Сохранить ответ на отзыв (пустая строка — убрать ответ). */
+async function writeReviewReply(id: string, reply: string): Promise<void> {
+  const replies = await readReviewReplies();
+  if (reply) replies[id] = reply;
+  else delete replies[id];
+  await putYdbSetting(REVIEW_REPLIES_KEY, JSON.stringify(replies));
+}
+
+/** Удалить ответ вместе с отзывом (чтобы не оставлять мусора). */
+async function dropReviewReply(id: string): Promise<void> {
+  const replies = await readReviewReplies();
+  if (!(id in replies)) return;
+  delete replies[id];
+  await putYdbSetting(REVIEW_REPLIES_KEY, JSON.stringify(replies));
+}
+
+/** Записать отзыв в YDB (без ответа — он живёт в настройках). */
+async function upsertYdbReview(review: Review): Promise<void> {
+  const sql = await getSql();
+  await sql`
+    UPSERT INTO ${sql.identifier(T.reviews)} (id, name, city, rating, text, status, createdAt)
+    VALUES (${review.id}, ${review.name}, ${review.city}, ${review.rating}, ${review.text}, ${review.status}, ${review.createdAt})
+  `;
 }
 
 /** Сохранить новый отзыв (всегда статус "new" — на модерации). */
@@ -862,12 +915,10 @@ export async function createYdbReview(input: ReviewInput): Promise<Review> {
     rating: input.rating,
     text: input.text,
     status: "new",
+    reply: "",
     createdAt: new Date().toISOString(),
   };
-  await sql`
-    UPSERT INTO ${sql.identifier(T.reviews)} (id, name, city, rating, text, status, createdAt)
-    VALUES (${review.id}, ${review.name}, ${review.city}, ${review.rating}, ${review.text}, ${review.status}, ${review.createdAt})
-  `;
+  await upsertYdbReview(review);
   return review;
 }
 
@@ -878,11 +929,13 @@ export async function listYdbReviews(): Promise<Review[]> {
   const result = await sql`
     SELECT id, name, city, rating, text, status, createdAt FROM ${sql.identifier(T.reviews)}
   `;
+  const replies = await readReviewReplies();
   return ((result[0] ?? []) as Row[])
     .map((row) => {
       const status = str(row, "status");
+      const id = str(row, "id");
       return {
-        id: str(row, "id"),
+        id,
         name: str(row, "name"),
         city: str(row, "city"),
         rating: str(row, "rating") || "5",
@@ -891,6 +944,7 @@ export async function listYdbReviews(): Promise<Review[]> {
         status: (status === "published" || status === "hidden"
           ? status
           : "new") as ReviewStatus,
+        reply: replies[id] ?? "",
         createdAt: str(row, "createdAt"),
       };
     })
@@ -905,7 +959,7 @@ export async function listYdbPublishedReviews(): Promise<Review[]> {
 
 export async function updateYdbReview(
   id: string,
-  patch: Partial<Pick<Review, "status">>,
+  patch: Partial<Pick<Review, "status" | "reply">>,
 ): Promise<Review | undefined> {
   await ensureTables();
   const sql = await getSql();
@@ -915,6 +969,7 @@ export async function updateYdbReview(
   const row = (result[0] ?? [])[0] as Row | undefined;
   if (!row) return undefined;
   const status = str(row, "status");
+  const replies = await readReviewReplies();
   const current: Review = {
     id: str(row, "id"),
     name: str(row, "name"),
@@ -922,13 +977,21 @@ export async function updateYdbReview(
     rating: str(row, "rating") || "5",
     text: str(row, "text"),
     status: (status === "published" || status === "hidden" ? status : "new") as ReviewStatus,
+    reply: replies[id] ?? "",
     createdAt: str(row, "createdAt"),
   };
-  const updated: Review = { ...current, status: patch.status ?? current.status };
-  await sql`
-    UPSERT INTO ${sql.identifier(T.reviews)} (id, name, city, rating, text, status, createdAt)
-    VALUES (${updated.id}, ${updated.name}, ${updated.city}, ${updated.rating}, ${updated.text}, ${updated.status}, ${updated.createdAt})
-  `;
+  const updated: Review = {
+    ...current,
+    status: patch.status ?? current.status,
+    reply: patch.reply ?? current.reply,
+  };
+  // Статус — в строку отзыва; ответ — в настройки (только если его меняли).
+  if (patch.status !== undefined) {
+    await upsertYdbReview(updated);
+  }
+  if (patch.reply !== undefined) {
+    await writeReviewReply(id, updated.reply);
+  }
   return updated;
 }
 
@@ -936,5 +999,9 @@ export async function deleteYdbReview(id: string): Promise<boolean> {
   await ensureTables();
   const sql = await getSql();
   await sql`DELETE FROM ${sql.identifier(T.reviews)} WHERE id = ${id}`;
+  // Ответ хранится отдельно — убираем и его, чтобы не копить мусор.
+  await dropReviewReply(id).catch((err) =>
+    console.error("[ydb] Не удалось удалить ответ на отзыв:", err),
+  );
   return true;
 }

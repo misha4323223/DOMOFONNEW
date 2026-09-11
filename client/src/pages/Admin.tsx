@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Card,
   CardContent,
@@ -44,6 +45,8 @@ interface SiteReview {
   rating: string;
   text: string;
   status: "new" | "published" | "hidden";
+  /** Ответ службы на отзыв; пусто — ответа нет. */
+  reply: string;
   createdAt: string;
 }
 
@@ -395,6 +398,37 @@ function ReviewsBoard() {
   const [reviews, setReviews] = useState<SiteReview[] | null>(null);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Карточка, в которой сейчас открыта форма ответа (id) и черновик текста
+  const [replyFor, setReplyFor] = useState<string | null>(null);
+  const [replyDraft, setReplyDraft] = useState("");
+  const [savingReply, setSavingReply] = useState(false);
+  // Развёрнутые отзывы (по умолчанию текст показываем компактно)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const openReply = (review: SiteReview) => {
+    setReplyFor(review.id);
+    setReplyDraft(review.reply ?? "");
+  };
+
+  /** Сохранить ответ службы на отзыв (поддерживает и очистку ответа). */
+  const saveReply = async (review: SiteReview, value: string) => {
+    if (savingReply) return;
+    const reply = value.trim();
+    setSavingReply(true);
+    try {
+      await apiRequest("PATCH", `/api/admin/reviews/${review.id}`, { reply });
+      setReviews((prev) =>
+        prev ? prev.map((r) => (r.id === review.id ? { ...r, reply } : r)) : prev,
+      );
+      setReplyFor(null);
+      setReplyDraft("");
+      setError("");
+    } catch {
+      setError("Не удалось сохранить ответ на отзыв");
+    } finally {
+      setSavingReply(false);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -487,20 +521,23 @@ function ReviewsBoard() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {reviews.map((review) => (
-            <Card key={review.id}>
-              <CardContent className="pt-5">
-                <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-                  <div className="flex items-center gap-3">
-                    <span className="font-semibold">{review.name}</span>
-                    {review.city && (
-                      <span className="text-sm text-muted-foreground">
-                        {review.city}
-                      </span>
-                    )}
+          {reviews.map((review) => {
+            const isExpanded = Boolean(expanded[review.id]);
+            const hasReply = Boolean(review.reply?.trim());
+            const replyOpen = replyFor === review.id;
+            return (
+              <Card key={review.id}>
+                <CardContent className="p-4">
+                  {/* Всё в одну строку: имя, звёзды, город, дата и действия */}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                    <span className="text-sm font-semibold">{review.name}</span>
                     <ReviewStars rating={Number(review.rating) || 0} />
-                  </div>
-                  <div className="flex items-center gap-2">
+                    {review.city && (
+                      <span className="text-xs text-muted-foreground">{review.city}</span>
+                    )}
+                    <span className="ml-auto text-xs text-muted-foreground/70">
+                      {formatDate(review.createdAt)}
+                    </span>
                     <Badge
                       variant="secondary"
                       className={
@@ -542,6 +579,16 @@ function ReviewsBoard() {
                           </Button>
                         )}
                         <Button
+                          variant={hasReply ? "ghost" : "outline"}
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => openReply(review)}
+                          title={hasReply ? "Изменить ответ" : "Ответить клиенту"}
+                        >
+                          <MessageSquareQuote className="mr-1 h-3.5 w-3.5" />
+                          {hasReply ? "Изменить ответ" : "Ответить"}
+                        </Button>
+                        <Button
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2 text-xs text-destructive"
@@ -554,16 +601,95 @@ function ReviewsBoard() {
                       </>
                     )}
                   </div>
-                </div>
-                <p className="text-sm leading-relaxed text-muted-foreground">
-                  {review.text}
-                </p>
-                <p className="mt-2 text-xs text-muted-foreground/70">
-                  {formatDate(review.createdAt)}
-                </p>
-              </CardContent>
-            </Card>
-          ))}
+
+                  <p
+                    className={`mt-2 text-sm leading-relaxed text-muted-foreground ${
+                      isExpanded ? "" : "line-clamp-3"
+                    }`}
+                  >
+                    {review.text}
+                  </p>
+                  {review.text.length > 180 && (
+                    <button
+                      type="button"
+                      className="mt-1 text-xs font-semibold text-primary hover:underline"
+                      onClick={() =>
+                        setExpanded((prev) => ({
+                          ...prev,
+                          [review.id]: !prev[review.id],
+                        }))
+                      }
+                    >
+                      {isExpanded ? "Свернуть" : "Читать полностью"}
+                    </button>
+                  )}
+
+                  {hasReply && !replyOpen && (
+                    <div className="mt-2.5 rounded-md border-l-2 border-primary/40 bg-muted/50 px-3 py-2">
+                      <p className="mb-0.5 text-[11px] font-semibold text-primary">
+                        Ответ службы
+                      </p>
+                      <p className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
+                        {review.reply}
+                      </p>
+                    </div>
+                  )}
+
+                  {replyOpen && (
+                    <div className="mt-3 space-y-2">
+                      <Textarea
+                        value={replyDraft}
+                        onChange={(e) => setReplyDraft(e.target.value)}
+                        placeholder="Ответ клиенту — он появится под отзывом на сайте"
+                        rows={3}
+                        maxLength={1000}
+                        autoFocus
+                        className="text-sm"
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          size="sm"
+                          className="h-7 px-3 text-xs"
+                          disabled={savingReply}
+                          onClick={() => saveReply(review, replyDraft)}
+                        >
+                          {savingReply ? (
+                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Check className="mr-1 h-3.5 w-3.5" />
+                          )}
+                          Сохранить ответ
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => {
+                            setReplyFor(null);
+                            setReplyDraft("");
+                          }}
+                        >
+                          Отмена
+                        </Button>
+                        {hasReply && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs text-destructive"
+                            disabled={savingReply}
+                            onClick={() => saveReply(review, "")}
+                          >
+                            <Trash2 className="mr-1 h-3.5 w-3.5" />
+                            Убрать ответ
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       )}
     </main>

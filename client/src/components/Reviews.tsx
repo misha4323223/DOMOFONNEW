@@ -14,6 +14,8 @@ export interface SiteReview {
   /** Оценка от 1 до 5 (строка из БД). */
   rating: string;
   text: string;
+  /** Ответ службы на отзыв; пусто — ответа нет. */
+  reply?: string;
   createdAt: string;
 }
 
@@ -202,6 +204,16 @@ export function Reviews({ content }: { content: ReviewsContent }) {
                   <p className="text-muted-foreground leading-relaxed mb-4">
                     {review.text}
                   </p>
+                  {review.reply?.trim() ? (
+                    <div className="mb-4 rounded-md border-l-2 border-primary/40 bg-muted/50 px-3 py-2">
+                      <p className="text-xs font-semibold text-primary mb-0.5">
+                        Ответ службы
+                      </p>
+                      <p className="text-sm text-muted-foreground leading-relaxed">
+                        {review.reply}
+                      </p>
+                    </div>
+                  ) : null}
                   <p className="font-semibold">{review.name}</p>
                 </CardContent>
               </Card>

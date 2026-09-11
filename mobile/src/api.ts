@@ -235,11 +235,15 @@ export const api = {
   reviews: (token: string) =>
     request("/api/admin/reviews", { token }) as Promise<Review[]>,
 
-  /** Сменить статус отзыва: "new" → "published" / "hidden". */
-  updateReview: (token: string, id: string, status: ReviewStatus) =>
+  /** Сменить статус отзыва и/или сохранить ответ службы (reply: "" — убрать). */
+  updateReview: (
+    token: string,
+    id: string,
+    patch: { status?: ReviewStatus; reply?: string },
+  ) =>
     request(`/api/admin/reviews/${id}`, {
       method: "PATCH",
-      body: { status },
+      body: patch,
       token,
     }) as Promise<Review>,
 
@@ -290,6 +294,8 @@ export interface Review {
   /** Текст отзыва. */
   text: string;
   status: ReviewStatus;
+  /** Ответ службы на отзыв; пусто — ответа нет. */
+  reply: string;
   createdAt: string;
 }
 

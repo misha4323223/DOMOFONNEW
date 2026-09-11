@@ -613,13 +613,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.json(reviews);
   }));
 
-  // Смена статуса отзыва админом: "new" → "published" / "hidden"
+  // Правка отзыва админом: смена статуса ("new" → "published" / "hidden")
+  // и/или ответ службы на отзыв (пустая строка — убрать ответ).
+  const REVIEW_REPLY_MAX_LENGTH = 1000;
+
   app.patch("/api/admin/reviews/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
-    const status = req.body?.status;
-    if (status !== "new" && status !== "published" && status !== "hidden") {
-      return res.status(400).json({ message: "Некорректный статус" });
+    const patch: { status?: "new" | "published" | "hidden"; reply?: string } = {};
+
+    if (req.body?.status !== undefined) {
+      const status = req.body.status;
+      if (status !== "new" && status !== "published" && status !== "hidden") {
+        return res.status(400).json({ message: "Некорректный статус" });
+      }
+      patch.status = status;
     }
-    const review = await storage.updateReview(req.params.id, { status });
+
+    if (req.body?.reply !== undefined) {
+      if (typeof req.body.reply !== "string") {
+        return res.status(400).json({ message: "Ответ должен быть текстом" });
+      }
+      const reply = req.body.reply.trim();
+      if (reply.length > REVIEW_REPLY_MAX_LENGTH) {
+        return res.status(400).json({ message: "Ответ слишком длинный" });
+      }
+      patch.reply = reply;
+    }
+
+    if (patch.status === undefined && patch.reply === undefined) {
+      return res.status(400).json({ message: "Нет изменений" });
+    }
+
+    const review = await storage.updateReview(req.params.id, patch);
     if (!review) {
       return res.status(404).json({ message: "Отзыв не найден" });
     }
