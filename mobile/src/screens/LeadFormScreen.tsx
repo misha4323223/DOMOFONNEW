@@ -32,7 +32,7 @@ import {
 import { queueLeadCreate, queueLeadUpdate } from "../sync";
 import { colors } from "../theme";
 import { CRITICAL_DAYS, STALE_DAYS, staleInfo } from "../leadAge";
-import { buildAddressQuery, openAddressInNavigator } from "../maps";
+import { useRouteCity } from "../components/CityPicker";
 
 interface Props {
   token: string;
@@ -273,6 +273,9 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
   // Заявка висит больше недели — предупреждаем прямо в форме
   const stale = lead ? staleInfo(lead) : null;
 
+  // Маршрут до адреса: если город не понятен — спросим (окно picker)
+  const { openRoute, picker } = useRouteCity();
+
   return (
     <SafeAreaView style={styles.root}>
       <KeyboardAvoidingView
@@ -435,20 +438,14 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
               styles.routeRow,
               pressed && { opacity: 0.7 },
             ]}
-            onPress={() => {
-              // У ручных заявок в поле «город» лежит название города
-              const query = buildAddressQuery(
+            onPress={() =>
+              // У ручных заявок в поле «Город» лежит название города
+              openRoute({
+                name: isCityField ? name : "",
                 address,
-                isCityField ? name : undefined,
-              );
-              openAddressInNavigator(query).then((ok) => {
-                if (!ok) {
-                  setError(
-                    "Не удалось открыть карты — на устройстве нет приложения с картами",
-                  );
-                }
-              });
-            }}
+                source: isCityField ? "admin" : "site",
+              })
+            }
             hitSlop={4}
           >
             <Ionicons name="navigate" size={14} color={colors.primary} />
@@ -539,6 +536,9 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
         </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Окно выбора города — показывается, только когда город не ясен из адреса */}
+      {picker}
     </SafeAreaView>
   );
 }

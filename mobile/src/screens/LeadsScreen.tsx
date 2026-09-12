@@ -45,7 +45,7 @@ import {
   staleInfo,
   staleSummary,
 } from "../leadAge";
-import { buildAddressQuery, openAddressInNavigator } from "../maps";
+import { useRouteCity } from "../components/CityPicker";
 
 interface Props {
   token: string;
@@ -295,22 +295,8 @@ export function LeadsScreen({ token, onEdit }: Props) {
     return [base, styles.statusChipNew];
   };
 
-  /**
-   * Открыть адрес заявки в навигаторе.
-   * У ручных заявок в поле «имя» лежит город — подставляем его к улице.
-   */
-  const openRoute = (lead: Lead) => {
-    const city = lead.source === "admin" ? lead.name : undefined;
-    const query = buildAddressQuery(lead.address, city);
-    openAddressInNavigator(query).then((ok) => {
-      if (!ok) {
-        Alert.alert(
-          "Не удалось открыть карты",
-          "Похоже, на устройстве нет приложения с картами. Установите Яндекс Карты или Навигатор.",
-        );
-      }
-    });
-  };
+  // Маршрут до адреса: если город не понятен из заявки — спросим (окно picker)
+  const { openRoute, picker } = useRouteCity();
 
   const statusChipTextStyle = (active: boolean, value: LeadStatus) => {
     if (!active) return styles.statusChipText;
@@ -687,6 +673,9 @@ export function LeadsScreen({ token, onEdit }: Props) {
           }
         />
       )}
+
+      {/* Окно выбора города — показывается, только когда город не ясен из заявки */}
+      {picker}
     </SafeAreaView>
   );
 }
