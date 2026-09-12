@@ -195,19 +195,43 @@ async function ensureTables(): Promise<void> {
           PRIMARY KEY (id)
         )
       `);
-      // Для таблиц, созданных до появления фото: добавляем колонку.
-      // Колонка уже существует — это нормально, пропускаем.
-      await step("alter chat add image", () =>
-        sql`ALTER TABLE ${sql.identifier(T.chat)} ADD COLUMN image Utf8`,
-      );
-      // Привязка заметок к заявкам: колонка появилась позже создания таблицы.
-      // Пробуем два синтаксиса — на случай, если первый не принимается.
-      await step("alter notes add leadId (Utf8)", () =>
-        sql`ALTER TABLE ${sql.identifier(T.notes)} ADD COLUMN leadId Utf8`,
-      );
-      await step("alter notes add leadId (Optional<Utf8>)", () =>
-        sql`ALTER TABLE ${sql.identifier(T.notes)} ADD COLUMN leadId Optional<Utf8>`,
-      );
+      // Миграции «на месте»: колонки появились позже создания таблиц.
+      //
+      // ВАЖНО: YDB не поддерживает ADD COLUMN IF NOT EXISTS, а повторный ALTER
+      // уже существующей колонки отвечает невнятной ошибкой
+      // «ERROR(1030): Type annotation» — и она попадала в лог при каждом
+      // холодном старте контейнера, хотя всё работало (колонки уже были).
+      // Поэтому сначала проверяем колонку дешёвым SELECT'ом и делаем ALTER
+      // только тогда, когда её действительно нет.
+      const hasColumn = async (
+        table: string,
+        column: string,
+      ): Promise<boolean> => {
+        try {
+          await sql`SELECT ${sql.identifier(column)} FROM ${sql.identifier(table)} LIMIT 1`;
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const ensureColumn = async (
+        table: string,
+        column: string,
+      ): Promise<void> => {
+        // Колонка уже есть — ничего не делаем (иначе YDB ответит ошибкой
+        // «column already exists» и зашумит лог на каждом холодном старте).
+        if (await hasColumn(table, column)) return;
+        await step(`alter ${table} add ${column}`, () =>
+          sql`ALTER TABLE ${sql.identifier(table)} ADD COLUMN ${sql.identifier(column)} Utf8`,
+        );
+        // Первый синтаксис мог не приняться — проверяем и пробуем второй.
+        if (await hasColumn(table, column)) return;
+        await step(`alter ${table} add ${column} (Optional)`, () =>
+          sql`ALTER TABLE ${sql.identifier(table)} ADD COLUMN ${sql.identifier(column)} Optional<Utf8>`,
+        );
+      };
+      await ensureColumn(T.chat, "image");
+      await ensureColumn(T.notes, "leadId");
       await step("create reviews", () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.reviews)} (
           id Utf8 NOT NULL,
