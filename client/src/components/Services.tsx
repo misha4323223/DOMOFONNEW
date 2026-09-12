@@ -1,9 +1,9 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings, Wrench, type LucideIcon } from "lucide-react";
+import { Camera, Settings, Wrench, type LucideIcon } from "lucide-react";
 import type { ServicesContent } from "@shared/content";
 
 // Иконки карточек услуг: при добавлении новых карточек иконки повторяются по кругу
-const ICONS: LucideIcon[] = [Settings, Wrench];
+const ICONS: LucideIcon[] = [Settings, Wrench, Camera];
 
 export function Services({ content }: { content: ServicesContent }) {
   return (
@@ -18,7 +18,7 @@ export function Services({ content }: { content: ServicesContent }) {
           </p>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-8">
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
           {content.items.map((service, index) => {
             const Icon = ICONS[index % ICONS.length];
             return (

@@ -197,6 +197,24 @@ export interface HomeContent {
   footer: FooterContent;
 }
 
+/**
+ * Новые пункты, которые надо доставить в уже сохранённый контент.
+ *
+ * Массивы читаются из БД как есть (админ мог их отредактировать), поэтому
+ * новый пункт из DEFAULT_CONTENT сам в сохранённый контент не попадёт —
+ * добавленная услуга не появилась бы на сайте вообще. Здесь перечислено, что
+ * именно доставлять: путь в контенте → поле, по которому узнаём «такой уже
+ * есть», и список значений для доставки.
+ *
+ * Указывать надо только НОВЫЕ записи: переименованные или удалённые админом
+ * пункты возвращать нельзя. Добавляешь новую услугу — впиши её сюда.
+ */
+const APPENDED_LISTS: Record<string, { key: string; ids: string[] }> = {
+  "services.items": { key: "title", ids: ["Видеонаблюдение"] },
+  "form.serviceOptions": { key: "value", ids: ["cctv"] },
+  "footer.servicesLinks": { key: "label", ids: ["Видеонаблюдение"] },
+};
+
 /** Ограничения, чтобы в БД не попадали гигантские/вредные строки. */
 export const CONTENT_LIMITS = {
   maxStringLength: 20_000,
@@ -258,6 +276,17 @@ export const DEFAULT_CONTENT: HomeContent = {
           "Замена компонентов",
           "Настройка системы",
           "Профилактика",
+        ],
+      },
+      {
+        title: "Видеонаблюдение",
+        description:
+          "Ставим камеры и настраиваем просмотр с телефона — квартира, дом, подъезд, магазин.",
+        features: [
+          "Камеры и регистраторы",
+          "Просмотр с телефона",
+          "Хранение записей",
+          "Удалённый доступ",
         ],
       },
     ],
@@ -345,6 +374,7 @@ export const DEFAULT_CONTENT: HomeContent = {
       { value: "repair", label: "Обслуживание / не работает" },
       { value: "maintenance", label: "Обслуживание" },
       { value: "consult", label: "Консультация" },
+      { value: "cctv", label: "Видеонаблюдение" },
     ],
     submitLabel: "Отправить заявку",
     submittingLabel: "Отправляем…",
@@ -379,6 +409,7 @@ export const DEFAULT_CONTENT: HomeContent = {
     servicesLinks: [
       { label: "Установка домофонов", href: "#services" },
       { label: "Обслуживание", href: "#services" },
+      { label: "Видеонаблюдение", href: "#services" },
       { label: "Оставить заявку", href: "#request-form" },
     ],
     contactsTitle: "Контакты",
@@ -455,6 +486,25 @@ function sanitizeNode(
         }
       }
     }
+
+    // Дополняем список новыми пунктами из дефолтов — см. APPENDED_LISTS.
+    const appended = APPENDED_LISTS[key];
+    if (appended && isRecord(elementTemplate)) {
+      const present = new Set(
+        out.filter(isRecord).map((item) => String(item[appended.key] ?? "")),
+      );
+      for (const fallback of template) {
+        if (out.length >= max) break;
+        if (!isRecord(fallback)) continue;
+        const id = String(fallback[appended.key] ?? "");
+        if (!id || !appended.ids.includes(id) || present.has(id)) continue;
+        out.push(
+          sanitizeNode(elementTemplate, cloneContent(fallback), [...path, "0"]),
+        );
+        present.add(id);
+      }
+    }
+
     return out;
   }
 

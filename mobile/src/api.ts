@@ -70,6 +70,7 @@ export function statusLabel(value: LeadStatus | undefined): string {
 
 export const SERVICES: { value: string; label: string }[] = [
   { value: "install", label: "Установка домофона" },
+  { value: "cctv", label: "Видеонаблюдение" },
   { value: "repair", label: "Обслуживание / не работает" },
   { value: "maintenance", label: "Обслуживание" },
   { value: "consult", label: "Консультация" },

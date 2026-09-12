@@ -36,6 +36,7 @@ import {
   Star,
   Trash2,
 } from "lucide-react";
+import { SERVICE_LABELS } from "@shared/services";
 import type { Lead, LeadStatus } from "@shared/schema";
 
 /** Отзыв клиента — модель из API (совпадает с server/ydb.ts). */
@@ -51,20 +52,37 @@ interface SiteReview {
   createdAt: string;
 }
 
-/**
- * Ссылка на Яндекс Карты с готовым маршрутом до адреса заявки
- * (от текущего местоположения — открывается навигатор, можно сразу ехать).
- */
-function mapsRouteUrl(address: string): string {
-  return `https://yandex.ru/maps/?rtext=~${encodeURIComponent(address.trim())}&rtt=auto`;
+/** Города, в которых служба работает постоянно. */
+const SERVICE_CITIES = ["Богородицк", "Щёкино", "Ефремов"];
+
+/** Регион обслуживания — подставляется, если города в заявке нет. */
+const SERVICE_REGION = "Тульская область";
+
+/** Найти известный город внутри строки адреса («в Щёкине, ул. …»). */
+function findCity(text: string): string | null {
+  const haystack = text.toLowerCase().replace(/ё/g, "е");
+  for (const city of SERVICE_CITIES) {
+    const root = city.toLowerCase().replace(/ё/g, "е").slice(0, Math.max(4, city.length - 1));
+    if (haystack.includes(root)) return city;
+  }
+  return null;
 }
 
-const SERVICE_LABELS: Record<string, string> = {
-  install: "Установка домофона",
-  repair: "Обслуживание / не работает",
-  maintenance: "Обслуживание",
-  consult: "Консультация",
-};
+/**
+ * Ссылка на Яндекс Карты с готовым маршрутом до адреса заявки (от текущего
+ * местоположения — открывается навигатор, можно сразу ехать).
+ *
+ * Город берём из имени (у заявок, добавленных вручную, там лежит город) или
+ * из самого адреса. Если города нет совсем — ограничиваем поиск регионом,
+ * иначе карты могут увести в одноимённую улицу другого города.
+ */
+function mapsRouteUrl(lead: Lead): string {
+  const address = lead.address.trim();
+  const city =
+    (lead.source === "admin" ? findCity(lead.name) : null) ?? findCity(address);
+  const query = city ? address : `${address}, ${SERVICE_REGION}`;
+  return `https://yandex.ru/maps/?rtext=~${encodeURIComponent(query)}&rtt=auto`;
+}
 
 const STATUS_OPTIONS: { value: LeadStatus; label: string }[] = [
   { value: "new", label: "Новая" },
@@ -307,7 +325,7 @@ function LeadsBoard() {
                     </a>
                     {lead.address ? (
                       <a
-                        href={mapsRouteUrl(lead.address)}
+                        href={mapsRouteUrl(lead)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-sm flex items-start gap-1.5 text-primary hover:underline"
@@ -376,7 +394,7 @@ function LeadsBoard() {
                         <TableCell className="max-w-[220px]">
                           {lead.address ? (
                             <a
-                              href={mapsRouteUrl(lead.address)}
+                              href={mapsRouteUrl(lead)}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="text-primary hover:underline flex items-center gap-1.5"
