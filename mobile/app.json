@@ -23,8 +23,7 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Разрешите доступ к фото, чтобы заменить фото на сайте",
-          "microphonePermission": false
+          "photosPermission": "Разрешите доступ к фото, чтобы заменить фото на сайте"
         }
       ],
       "expo-speech-recognition"

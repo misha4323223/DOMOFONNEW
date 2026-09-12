@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -11,6 +11,11 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import Ionicons from "@expo/vector-icons/Ionicons";
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from "expo-speech-recognition";
 import {
   api,
   SERVICES,
@@ -46,6 +51,144 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
 
   // Заметки, привязанные к заявке (просмотр; привязывают во вкладке «Заметки»)
   const [leadNotes, setLeadNotes] = useState<Note[]>([]);
+
+  // --- Голосовой ввод: диктуем фразу, поля заполняются сами ---
+  const [dictating, setDictating] = useState(false);
+  const [dictationText, setDictationText] = useState("");
+  const [dictationBusy, setDictationBusy] = useState(false);
+  const [dictationError, setDictationError] = useState<string | null>(null);
+  // Готовые (финальные) куски речи и текущий недописанный хвост
+  const finalSpeechRef = useRef("");
+  const interimSpeechRef = useRef("");
+  const parseOnEndRef = useRef(false);
+
+  /** Разобрать распознанный текст на сервере и разложить по полям. */
+  const fillFromDictation = async (spoken: string): Promise<void> => {
+    const text = spoken.replace(/\s+/g, " ").trim();
+    if (!text) {
+      setDictationError("Ничего не расслышали — попробуйте ещё раз");
+      return;
+    }
+    setDictationText(text);
+    setDictationBusy(true);
+    setDictationError(null);
+    try {
+      const { fields } = await api.parseDictation(token, text);
+      if (fields.name) setName(fields.name);
+      if (fields.phone) setPhone(fields.phone);
+      if (fields.address) setAddress(fields.address);
+      if (fields.comment) setComment(fields.comment);
+      if (fields.service) setService(fields.service);
+    } catch {
+      // Сервер недоступен — диктовку не теряем, кладём её в комментарий
+      setComment((prev) => (prev ? `${prev}\n${text}` : text));
+      setDictationError("Сервер недоступен — текст добавлен в комментарий");
+    } finally {
+      setDictationBusy(false);
+    }
+  };
+
+  useSpeechRecognitionEvent("start", () => {
+    setDictating(true);
+    setDictationError(null);
+  });
+
+  useSpeechRecognitionEvent("result", (event) => {
+    const best = event.results?.[0]?.transcript?.trim() ?? "";
+    if (!best) return;
+    if (event.isFinal) {
+      // Речь распознаётся кусками (segments) — собираем их подряд
+      finalSpeechRef.current = finalSpeechRef.current
+        ? `${finalSpeechRef.current} ${best}`
+        : best;
+      interimSpeechRef.current = "";
+    } else {
+      interimSpeechRef.current = best;
+    }
+    setDictationText(
+      `${finalSpeechRef.current} ${interimSpeechRef.current}`.trim(),
+    );
+  });
+
+  useSpeechRecognitionEvent("error", (event) => {
+    const messages: Record<string, string> = {
+      "not-allowed": "Разрешите доступ к микрофону в настройках приложения",
+      "no-speech": "Речь не расслышали — попробуйте ещё раз",
+      network: "Для распознавания речи нужен интернет",
+      "service-not-allowed": "На этом устройстве нет распознавания русской речи",
+      busy: "Микрофон занят другим приложением",
+      aborted: "",
+    };
+    const text = messages[event.error] ?? event.message ?? "Не удалось распознать речь";
+    if (text) setDictationError(text);
+  });
+
+  useSpeechRecognitionEvent("end", () => {
+    setDictating(false);
+    if (!parseOnEndRef.current) return;
+    parseOnEndRef.current = false;
+    const spoken = `${finalSpeechRef.current} ${interimSpeechRef.current}`;
+    void fillFromDictation(spoken);
+  });
+
+  // Уходим с экрана — выключаем микрофон
+  useEffect(
+    () => () => {
+      try {
+        ExpoSpeechRecognitionModule.abort();
+      } catch {
+        // микрофон уже выключен — это нормально
+      }
+    },
+    [],
+  );
+
+  const startDictation = async (): Promise<void> => {
+    setDictationError(null);
+    finalSpeechRef.current = "";
+    interimSpeechRef.current = "";
+    setDictationText("");
+    try {
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!permission.granted) {
+        setDictationError("Нужно разрешить доступ к микрофону");
+        return;
+      }
+      parseOnEndRef.current = true;
+      ExpoSpeechRecognitionModule.start({
+        lang: "ru-RU",
+        interimResults: true,
+        // Долгая диктовка: распознаём, пока не остановим сами
+        continuous: true,
+        maxAlternatives: 1,
+        addsPunctuation: true,
+        // Подсказки распознавателю — наши частые слова и названия
+        contextualStrings: [
+          "домофон",
+          "трубка",
+          "доводчик",
+          "вызов",
+          "квартира",
+          "подъезд",
+          "улица",
+          "домофонная служба",
+          "не работает",
+          "установить",
+        ],
+      });
+    } catch {
+      parseOnEndRef.current = false;
+      setDictationError("Не удалось включить микрофон");
+    }
+  };
+
+  const stopDictation = (): void => {
+    try {
+      ExpoSpeechRecognitionModule.stop();
+    } catch {
+      setDictating(false);
+    }
+  };
 
   // Подгружаем привязанные заметки при открытии формы редактирования
   useEffect(() => {
@@ -145,6 +288,58 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
+        {/* Голосовой ввод: надиктовали фразу — поля заполнились сами */}
+        <View style={styles.dictationCard}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.dictationButton,
+              dictating && styles.dictationButtonActive,
+              dictationBusy && { opacity: 0.6 },
+              pressed && { opacity: 0.85 },
+            ]}
+            onPress={dictating ? stopDictation : startDictation}
+            disabled={dictationBusy}
+          >
+            {dictationBusy ? (
+              <ActivityIndicator color={colors.primaryForeground} />
+            ) : (
+              <Ionicons
+                name={dictating ? "stop-circle" : "mic"}
+                size={22}
+                color={dictating ? colors.text : colors.primaryForeground}
+              />
+            )}
+            <Text
+              style={[
+                styles.dictationButtonText,
+                dictating && styles.dictationButtonTextActive,
+              ]}
+            >
+              {dictating ? "Остановить" : "🎤 Надиктовать заявку"}
+            </Text>
+          </Pressable>
+
+          {dictating ? (
+            <Text style={styles.dictationLive}>
+              {dictationText ||
+                "Говорите: имя, телефон, город, адрес, что случилось"}
+            </Text>
+          ) : dictationText ? (
+            <Text style={styles.dictationHint}>
+              Распознано: {dictationText}
+            </Text>
+          ) : (
+            <Text style={styles.dictationHint}>
+              Одна фраза: «Иванов Иван, 8 905 113 29 62, Ефремов, улица Мира дом 5,
+              не работает трубка»
+            </Text>
+          )}
+
+          {dictationError ? (
+            <Text style={styles.error}>{dictationError}</Text>
+          ) : null}
+        </View>
+
         <Text style={styles.label}>{isCityField ? "Город" : "Имя"}</Text>
         <View style={styles.fieldRow}>
           <TextInput
@@ -358,6 +553,47 @@ const styles = StyleSheet.create({
   noteTextDone: {
     textDecorationLine: "line-through",
     color: colors.textMuted,
+  },
+  dictationCard: {
+    backgroundColor: colors.card,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    padding: 12,
+    gap: 8,
+    marginBottom: 4,
+  },
+  dictationButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    paddingVertical: 12,
+  },
+  dictationButtonActive: {
+    backgroundColor: colors.inputBg,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  dictationButtonText: {
+    color: colors.primaryForeground,
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  dictationButtonTextActive: {
+    color: colors.text,
+  },
+  dictationHint: {
+    color: colors.textMuted,
+    fontSize: 12.5,
+    lineHeight: 17,
+  },
+  dictationLive: {
+    color: colors.text,
+    fontSize: 14,
+    lineHeight: 19,
   },
   fieldRow: {
     flexDirection: "row",

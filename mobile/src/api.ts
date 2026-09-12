@@ -179,6 +179,14 @@ export const api = {
       token,
     }),
 
+  /** Разобрать надиктованную фразу в поля заявки (распознаёт её устройство). */
+  parseDictation: (token: string, text: string) =>
+    request("/api/admin/parse", {
+      method: "POST",
+      body: { text },
+      token,
+    }) as Promise<{ text: string; fields: DictatedLead }>,
+
   /** Текущий контент главной страницы (публичный эндпоинт). */
   getContent: () =>
     request("/api/content") as Promise<{
@@ -377,4 +385,13 @@ export interface ScanResult {
   fullText: string;
   lines: string[];
   candidates: LeadCandidate[];
+}
+
+/** Поля заявки, найденные в надиктованной фразе. */
+export interface DictatedLead {
+  name: string;
+  phone: string;
+  address: string;
+  service: string | null;
+  comment: string;
 }

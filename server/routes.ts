@@ -7,7 +7,7 @@ import { SERVICE_LABELS } from "@shared/services";
 import { notifyNewLead, notifyNewReview, notifyChatMessage } from "./push";
 import { saveDeviceToken, removeDeviceToken } from "./ydb";
 import { recognizeHandwritten } from "./vision";
-import { parseCandidates } from "./parse";
+import { parseCandidates, parseDictation } from "./parse";
 import {
   sanitizeContent,
   HERO_IMAGE_KEYS,
@@ -248,6 +248,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         message: "Не удалось распознать текст (Yandex Vision)",
       });
     }
+  }));
+
+  // Разбор надиктованной фразы в поля заявки (голосовое создание заявки).
+  // Распознаёт текст само устройство (Android SpeechRecognizer), а раскладку
+  // по полям делает сервер — тем же правилам, что и на странице блокнота.
+  app.post("/api/admin/parse", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+    if (!text) {
+      return res.status(400).json({ message: "Пустой текст диктовки" });
+    }
+    if (text.length > 4000) {
+      return res.status(400).json({ message: "Слишком длинная диктовка" });
+    }
+    return res.json({ text, fields: parseDictation(text) });
   }));
 
   // Публичный контент главной страницы — читает и сайт, и админка-редактор

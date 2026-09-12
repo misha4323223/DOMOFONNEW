@@ -212,3 +212,217 @@ export function parseCandidates(lines: string[]): LeadCandidate[] {
   closeCurrent();
   return candidates;
 }
+
+// ---------------------------------------------------------------------------
+// Разбор надиктованной фразы (голосовое создание заявки)
+//
+// Диктовка не похожа на страницу блокнота: это одна фраза, где поля идут в
+// естественном порядке — «имя, телефон, адрес, что случилось». Поэтому делим
+// фразу не по строкам, а по смыслу:
+//   1) телефон — он есть в любом месте фразы и отделяет имя от остального;
+//   2) имя — слова до адреса и до описания работ;
+//   3) адрес — от первого адресного слова и до описания работ;
+//   4) остаток — комментарий (что нужно сделать).
+// ---------------------------------------------------------------------------
+
+/** Поля заявки, найденные в надиктованной фразе. */
+export interface DictatedLead {
+  name: string;
+  phone: string;
+  address: string;
+  service: string | null;
+  comment: string;
+}
+
+/** Служебные слова в начале фразы: «заявка», «запиши», «новый клиент»… */
+const DICTATION_FILLER_RE =
+  /^(?:заявка|заявку|нов(?:ый|ая|ое|ого)|клиент[ауы]?|абонент[ауы]?|записать|запиши|записывай|создать|создай|добавить|добавь|внести|внеси|принять|прими|телефон|номер|плюс|ещё|еще|ну|вот|это|пожалуйста)(?![а-яёa-z])/i;
+
+/**
+ * Начало описания работ или неисправности — с этого места начинается
+ * комментарий, поэтому адрес и имя ищем только ЛЕВЕЕ него.
+ * Список заведомо шире строгого: лишнее слово в комментарии не страшно,
+ * а вот потерянный адрес — страшно.
+ */
+const DICTATION_PROBLEM_RE =
+  /^(?:не|нет|ничего|ни|работ|открыв|закрыв|звен|отвеча|слышн|включ|выключ|свет|сломал|сломан|замыка|замкну|течёт|течет|потек|шум|гудит|гудок|барахлит|неполадк|проблем|жалоб|плохо|слаб|нужно|надо|проси|просят|просил|хочет|хотят|установ|подключ|замен|отремонтир|ремонт|обслуж|провер|настро|консульт|вопрос|уточн|сколько|цена|стоимост|стоит|срок)/i;
+
+/** Слово состоит только из букв (имя, город, улица). */
+const WORD_ONLY_RE = /^[а-яё]+$/i;
+
+/** Инициал: «И.», «П.А.» */
+const INITIALS_RE = /^(?:[а-яё]\.){1,2}$/i;
+
+/** Улица/адресное слово — начало адресной части. */
+function isAddressWord(token: string): boolean {
+  return ADDRESS_RE.test(token) || APARTMENT_RE.test(token);
+}
+
+/** Похоже на продолжение адреса: название улицы, номер дома, корпус. */
+function isAddressContinuation(token: string): boolean {
+  if (/^\d/.test(token)) return true;
+  return WORD_ONLY_RE.test(token);
+}
+
+/** Токен начинает описание работ/неисправности? (проверяем и пару слов) */
+function isProblemStart(tokens: string[], index: number): boolean {
+  const one = tokens[index] ?? "";
+  if (DICTATION_PROBLEM_RE.test(one)) return true;
+  const two = `${one} ${tokens[index + 1] ?? ""}`.trim();
+  return DICTATION_PROBLEM_RE.test(two);
+}
+
+/**
+ * Сколько слов в начале фразы похожи на имя. Имя — 1–3 слова из букв
+ * (инициалы допускаем), идущие до адресных слов и до описания работ.
+ * Первое слово адресное/служебное — имени нет (вернём 0).
+ */
+function countNameTokens(tokens: string[]): number {
+  let taken = 0;
+  for (let i = 0; i < tokens.length && taken < 3; i++) {
+    const token = tokens[i];
+    if (isAddressWord(token)) break;
+    if (isProblemStart(tokens, i)) break;
+    if (!WORD_ONLY_RE.test(token) && !INITIALS_RE.test(token)) break;
+    // «Иванов Иван Шекино, улица Ленина 12»: перед адресным словом после двух
+    // слов имени стоит уже город — оставляем его адресу, а не имени.
+    if (taken >= 2 && isAddressWord(tokens[i + 1] ?? "")) break;
+    taken++;
+  }
+  return taken;
+}
+
+/** Убрать служебные слова в начале фразы («заявка», «ну», «запиши»…). */
+function stripFiller(text: string): string {
+  let value = clean(text);
+  // Служебных слов в начале может быть несколько подряд
+  for (let i = 0; i < 4; i++) {
+    const next = value.replace(DICTATION_FILLER_RE, "").trim();
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+function capitalizeFirst(text: string): string {
+  return text ? text[0].toUpperCase() + text.slice(1) : text;
+}
+
+/**
+ * Разобрать надиктованную фразу в поля заявки.
+ * Незнакомое не теряем: всё, что не опознано, попадает в комментарий.
+ */
+export function parseDictation(raw: string): DictatedLead {
+  const result: DictatedLead = {
+    name: "",
+    phone: "",
+    address: "",
+    service: null,
+    comment: "",
+  };
+
+  const original = stripFiller(raw);
+  if (!original) return result;
+
+  // --- Телефон: он делит фразу на часть с именем и всё остальное ---
+  const phoneMatch = original.match(PHONE_RE);
+  if (phoneMatch) result.phone = normalizePhone(phoneMatch[0]);
+  const beforePhone = phoneMatch
+    ? stripFiller(original.slice(0, phoneMatch.index))
+    : "";
+  // Служебные слова бывают и после телефона: «…, номер 8916…, добавить заявку К…»
+  const afterPhone = phoneMatch
+    ? stripFiller(original.slice(phoneMatch.index! + phoneMatch[0].length))
+    : original;
+
+  // --- Имя: слова перед телефоном; если телефон продиктовали первым —
+  //     имя стоит сразу после него ---
+  const beforeTokens = clean(beforePhone.replace(/[,;]/g, " "))
+    .split(" ")
+    .filter(Boolean);
+  let nameTokensUsed = 0;
+  const nameFromBefore = countNameTokens(beforeTokens);
+  if (nameFromBefore > 0) {
+    result.name = clean(beforeTokens.slice(0, nameFromBefore).join(" "));
+  }
+
+  // --- Остаток фразы: адрес и что случилось ---
+  const tokens = clean(afterPhone.replace(/[,;]/g, " "))
+    .split(" ")
+    .filter(Boolean);
+
+  if (!result.name) {
+    nameTokensUsed = countNameTokens(tokens);
+    if (nameTokensUsed > 0) {
+      result.name = clean(tokens.slice(0, nameTokensUsed).join(" "));
+    }
+  }
+
+  const addressParts: string[] = [];
+  const commentParts: string[] = [];
+  // Слова перед телефоном, не вошедшие в имя: обычно это описание работ,
+  // сказанное до номера («нужно проверить домофон 8916…») — не теряем его.
+  for (const token of beforeTokens.slice(nameFromBefore)) {
+    commentParts.push(token);
+  }
+  let problemStarted = false;
+
+  for (let i = nameTokensUsed; i < tokens.length; i++) {
+    const token = tokens[i];
+
+    if (!problemStarted && isProblemStart(tokens, i)) problemStarted = true;
+    if (problemStarted) {
+      commentParts.push(token);
+      continue;
+    }
+
+    if (isAddressWord(token)) {
+      // Новая часть адреса — с запятой: «Ефремов, улица Мира дом 5»
+      if (addressParts.length) addressParts.push(",");
+      addressParts.push(token);
+      // За адресным словом тянем название улицы и номер дома (но не весь хвост)
+      let taken = 0;
+      while (i + 1 < tokens.length && taken < 3) {
+        const next = tokens[i + 1];
+        if (isAddressWord(next)) break;
+        if (isProblemStart(tokens, i + 1)) break;
+        if (!isAddressContinuation(next)) break;
+        addressParts.push(next);
+        i++;
+        taken++;
+        if (/^\d/.test(next)) break; // после номера дома адрес обычно закончился
+      }
+      continue;
+    }
+
+    // Одиночное слово из букв перед адресным словом — это город
+    // («Ефремов улица Мира 5», «Шекино, улица Ленина 12»).
+    // Всё остальное, что не опознано, уходит в комментарий — не теряем.
+    const isCity =
+      !addressParts.length &&
+      WORD_ONLY_RE.test(token) &&
+      isAddressWord(tokens[i + 1] ?? "");
+    if (isCity) {
+      addressParts.push(token);
+      continue;
+    }
+
+    commentParts.push(token);
+  }
+
+  // «город Ефремов» → «Ефремов»: служебное слово перед названием убираем
+  result.address = capitalizeFirst(
+    clean(
+      addressParts
+        .join(" ")
+        .replace(/\s+,/g, ",")
+        .replace(/,\s*/g, ", ")
+        .replace(/^(?:город|г\.)\s+/i, "")
+        .replace(/\s+(?:город|г\.)\s+/i, " "),
+    ),
+  );
+  result.comment = capitalizeFirst(clean(commentParts.join(" ")));
+  result.service = detectService(original);
+
+  return result;
+}
