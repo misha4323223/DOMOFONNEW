@@ -118,8 +118,13 @@ function optStr(value: string | null): Optional<TextType> {
 
 // ---------------------------------------------------------------------------
 // Создание таблиц при первом обращении (аналог прежнего ensureTable).
-// Таблицы уже могут существовать (их создаёт миграция из консоли) —
-// IF NOT EXISTS делает вызов безопасным.
+// Таблицы уже могут существовать (их создаёт миграция из консоли).
+//
+// ВАЖНО: на существующую таблицу YDB отвечает ошибкой GENERIC_ERROR
+// «Executing ESchemeOpCreateTable» даже на `CREATE TABLE IF NOT EXISTS` —
+// и эта ошибка шумела в логе на каждом холодном старте контейнера.
+// Поэтому перед CREATE проверяем таблицу дешёвым SELECT'ом и создаём
+// только реально отсутствующую.
 // ---------------------------------------------------------------------------
 
 let tablesReady: Promise<void> | undefined;
@@ -138,10 +143,36 @@ async function ensureTables(): Promise<void> {
         try {
           await fn();
         } catch (err) {
-          console.error(`[ydb] Не удалось выполнить «${name}»:`, err);
+          // Вложенные issues YDB в консоли Cloud Logging сворачиваются в
+          // «[Array]» — без JSON.stringify причину ошибки не видно.
+          const issues = (err as { issues?: unknown } | undefined)?.issues;
+          console.error(
+            `[ydb] Не удалось выполнить «${name}»: ${String(err)}` +
+              (issues ? `; issues=${JSON.stringify(issues)}` : ""),
+          );
         }
       };
-      await step("create leads", () => sql`
+      // Есть ли таблица: дешёвый SELECT по ней (аналог проверки колонок ниже).
+      const hasTable = async (table: string): Promise<boolean> => {
+        try {
+          await sql`SELECT 1 FROM ${sql.identifier(table)} LIMIT 1`;
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const createIfMissing = async (
+        name: string,
+        table: string,
+        ddl: () => unknown,
+      ): Promise<void> => {
+        // Таблица уже есть — ничего не делаем: CREATE для неё YDB отвергает
+        // ошибкой «Executing ESchemeOpCreateTable» и шумит лог на каждом
+        // холодном старте контейнера.
+        if (await hasTable(table)) return;
+        await step(`create ${name}`, ddl);
+      };
+      await createIfMissing("leads", T.leads, () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.leads)} (
           id Utf8 NOT NULL,
           name Utf8 NOT NULL,
@@ -156,14 +187,14 @@ async function ensureTables(): Promise<void> {
           PRIMARY KEY (id)
         )
       `);
-      await step("create devices", () => sql`
+      await createIfMissing("devices", T.devices, () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.devices)} (
           token Utf8 NOT NULL,
           registeredAt Utf8 NOT NULL,
           PRIMARY KEY (token)
         )
       `);
-      await step("create settings", () => sql`
+      await createIfMissing("settings", T.settings, () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.settings)} (
           key Utf8 NOT NULL,
           value Utf8 NOT NULL,
@@ -171,7 +202,7 @@ async function ensureTables(): Promise<void> {
           PRIMARY KEY (key)
         )
       `);
-      await step("create notes", () => sql`
+      await createIfMissing("notes", T.notes, () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.notes)} (
           id Utf8 NOT NULL,
           text Utf8 NOT NULL,
@@ -183,7 +214,7 @@ async function ensureTables(): Promise<void> {
           PRIMARY KEY (id)
         )
       `);
-      await step("create chat", () => sql`
+      await createIfMissing("chat", T.chat, () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.chat)} (
           id Utf8 NOT NULL,
           sender Utf8 NOT NULL,
@@ -232,7 +263,7 @@ async function ensureTables(): Promise<void> {
       };
       await ensureColumn(T.chat, "image");
       await ensureColumn(T.notes, "leadId");
-      await step("create reviews", () => sql`
+      await createIfMissing("reviews", T.reviews, () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.reviews)} (
           id Utf8 NOT NULL,
           name Utf8 NOT NULL,
@@ -806,6 +837,58 @@ export async function listYdbChatMessages(
   const filtered = after ? all.filter((m) => m.createdAt > after) : all;
   // Возвращаем последние `limit` сообщений (по возрастанию времени).
   return filtered.length > limit ? filtered.slice(filtered.length - limit) : filtered;
+}
+
+/**
+ * Ключ настройки: createdAt последнего ПРОЧИТАННОГО сообщения чата.
+ * Якорь хранится на сервере (а не в телефоне), поэтому счётчик непрочитанных
+ * одинаков на всех устройствах админов и не зависит от часов устройства.
+ */
+const CHAT_LAST_READ_KEY = "chat:last-read";
+
+export interface ChatUnread {
+  /** Сколько сообщений новее якоря прочтения. */
+  count: number;
+  /** createdAt последнего прочитанного сообщения (null — чат ещё не читали). */
+  readAt: string | null;
+  /** createdAt последнего сообщения в чате (null — сообщений нет). */
+  lastMessageAt: string | null;
+}
+
+/**
+ * Текущее состояние «непрочитанное» для чата админов.
+ * Считаем на сервере: сообщения новее якоря прочтения.
+ */
+export async function getYdbChatUnread(): Promise<ChatUnread> {
+  const [setting, messages] = await Promise.all([
+    getYdbSetting(CHAT_LAST_READ_KEY),
+    listYdbChatMessages(),
+  ]);
+  const readAt = setting?.value ? setting.value : null;
+  const lastMessageAt =
+    messages.length > 0 ? messages[messages.length - 1].createdAt : null;
+  return {
+    // Якоря нет (приложение ещё ни разу не открывало чат) — всю старую
+    // историю непрочитанной не считаем: клиент при первом запуске сам
+    // вызовет markYdbChatRead() и поставит якорь.
+    count: readAt ? messages.filter((m) => m.createdAt > readAt).length : 0,
+    readAt,
+    lastMessageAt,
+  };
+}
+
+/**
+ * Явно пометить ВСЕ сообщения чата прочитанными: якорь сдвигается на
+ * последнее сообщение (пустой чат — на «сейчас», чтобы первое же новое
+ * сообщение попало в счётчик). После вызова count всегда 0.
+ */
+export async function markYdbChatRead(): Promise<ChatUnread> {
+  const messages = await listYdbChatMessages();
+  const lastMessageAt =
+    messages.length > 0 ? messages[messages.length - 1].createdAt : null;
+  const readAt = lastMessageAt ?? new Date().toISOString();
+  await putYdbSetting(CHAT_LAST_READ_KEY, readAt);
+  return { count: 0, readAt, lastMessageAt };
 }
 
 export async function updateYdbChatMessage(

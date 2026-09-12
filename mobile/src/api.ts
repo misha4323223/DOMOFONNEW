@@ -266,7 +266,19 @@ export const api = {
     request(
       `/api/chat/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`,
       { token },
-    ) as Promise<ChatMessage[]>,  sendChatMessage: (token: string, text: string, sender: string, image?: string) =>
+    ) as Promise<ChatMessage[]>,
+
+  /**
+   * Сколько сообщений чата ещё не прочитано. Считает сервер по своему якорю
+   * прочтения — счётчик не зависит от часов телефона.
+   */
+  chatUnread: (token: string) =>
+    request("/api/chat/unread", { token }) as Promise<ChatUnread>,
+
+  /** Явно пометить все сообщения чата прочитанными (счётчик обнуляется). */
+  markChatRead: (token: string) =>
+    request("/api/chat/read", { method: "POST", token }) as Promise<ChatUnread>,
+  sendChatMessage: (token: string, text: string, sender: string, image?: string) =>
     request("/api/chat/messages", {
       method: "POST",
       body: image ? { text, sender, image } : { text, sender },
@@ -370,6 +382,16 @@ export interface ChatMessage {
   editedAt?: string;
   /** Фото в сообщении (data-url jpeg/png/webp). */
   image?: string;
+}
+
+/** Состояние непрочитанных сообщений чата (считает сервер). */
+export interface ChatUnread {
+  /** Сколько сообщений новее якоря прочтения. */
+  count: number;
+  /** createdAt последнего прочитанного сообщения (null — чат ещё не читали). */
+  readAt: string | null;
+  /** createdAt последнего сообщения в чате (null — сообщений нет). */
+  lastMessageAt: string | null;
 }
 
 export interface LeadCandidate {

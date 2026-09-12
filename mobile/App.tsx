@@ -16,13 +16,17 @@ import { ChatScreen } from "./src/screens/ChatScreen";
 import { ReviewsScreen } from "./src/screens/ReviewsScreen";
 import { ArchiveScreen } from "./src/screens/ArchiveScreen";
 import { AboutScreen } from "./src/screens/AboutScreen";
-import { api, type Lead, type LeadCandidate } from "./src/api";
+import type { Lead, LeadCandidate } from "./src/api";
 import { flushPending } from "./src/sync";
 import { colors } from "./src/theme";
 import { BottomNav, type NavTarget } from "./src/components/BottomNav";
-import { getChatLastSeen, markChatRead } from "./src/unread";
+import { IntroSplash } from "./src/components/IntroSplash";
+import { fetchChatUnread, markAllChatRead } from "./src/unread";
 
 const TOKEN_KEY = "admin_token";
+// Заставка: полную версию (камера осматривает площадку) показываем один раз
+// после установки/обновления, дальше — короткую (сразу логотип).
+const INTRO_KEY = "intro_seen";
 
 // Показываем уведомления, когда приложение открыто
 Notifications.setNotificationHandler({
@@ -49,6 +53,9 @@ type Screen =
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Какая версия заставки показывается на этом запуске (null — ещё читаем)
+  const [introMode, setIntroMode] = useState<"full" | "short" | null>(null);
+  const [introDone, setIntroDone] = useState(false);
   const [screen, setScreen] = useState<Screen>({ name: "leads" });
   const [reloadKey, setReloadKey] = useState(0);
   // Счётчик непрочитанных сообщений чата (бейдж на табе «Чат»)
@@ -59,8 +66,13 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const saved = await AsyncStorage.getItem(TOKEN_KEY);
+        const [saved, introSeen] = await Promise.all([
+          AsyncStorage.getItem(TOKEN_KEY),
+          AsyncStorage.getItem(INTRO_KEY),
+        ]);
         setToken(saved);
+        setIntroMode(introSeen ? "short" : "full");
+        if (!introSeen) await AsyncStorage.setItem(INTRO_KEY, "1");
       } finally {
         setLoading(false);
       }
@@ -142,29 +154,24 @@ export default function App() {
     setScreen({ name: "leads" });
   };
 
-  // Считаем непрочитанные: сообщения чата, созданные после якоря прочтения
-  // (серверное время последнего увиденного сообщения). Пока чат открыт —
-  // опросом занимается сам экран чата.
+  // Заставка отыграла — показываем приложение (стабильная ссылка: иначе
+  // анимация заставки перезапускалась бы на каждом рендере App)
+  const handleIntroDone = useCallback(() => setIntroDone(true), []);
+
+  // Непрочитанные считает СЕРВЕР: у него хранится якорь прочтения, поэтому
+  // счётчик одинаков на всех устройствах и не зависит от часов телефона.
+  // Первый запуск (якоря на сервере ещё нет) — считаем всю старую историю
+  // прочитанной: явно помечаем чат прочитанным и обнуляем бейдж.
   const pollChatUnread = useCallback(async () => {
     if (!token) return;
     try {
-      const anchor = await getChatLastSeen();
-      if (!anchor) {
-        // Первый запуск (или чат ни разу не открывали): считаем всю историю
-        // прочитанной. Якорь берём у СЕРВЕРА (createdAt последнего сообщения),
-        // чтобы часы телефона не влияли на счётчик.
-        const all = await api.chatMessages(token);
-        if (all && all.length > 0) {
-          await markChatRead(all[all.length - 1].createdAt);
-        } else {
-          // Сообщений нет — якорь на «сейчас»: первое же новое сообщение
-          // будет новее него и попадёт в счётчик
-          await markChatRead(new Date().toISOString());
-        }
+      const state = await fetchChatUnread(token);
+      if (state.readAt === null) {
+        await markAllChatRead(token);
+        setChatUnread(0);
         return;
       }
-      const data = await api.chatMessages(token, anchor);
-      setChatUnread(data && data.length > 0 ? Math.min(data.length, 99) : 0);
+      setChatUnread(Math.min(state.count, 99));
     } catch {
       // Офлайн — счётчик остаётся как есть
     }
@@ -181,45 +188,26 @@ export default function App() {
   }, [token, pollChatUnread]);
 
   // Опрос счётчика непрочитанных: каждые 10 секунд, пока чат не открыт.
-  // НЕ вызываем pollChatUnread() немедленно — это вызывает гонку с эффектом
-  // «выход из чата»: интервал читает старый якорь и показывает бейдж,
-  // который тут же обнуляется эффектом выхода.
+  // Пока чат открыт, счётчик обнуляется самим экраном чата (onRead).
   useEffect(() => {
     if (!token || screen.name === "chat") return;
     const interval = setInterval(pollChatUnread, 10_000);
     return () => clearInterval(interval);
   }, [token, screen.name, pollChatUnread]);
 
-  // При выходе из чата: быстрый финальный запрос, чтобы захватить
-  // сообщения, пришедшие между последним опросом чата и уходом.
-  // Если пользователь БЫЛ в чате — он их видел, значит помечаем
-  // как прочитанные (якорь = максимальный createdAt).
+  // При выходе из чата: явно помечаем всё прочитанным и сразу обнуляем бейдж.
+  // (Экран чата делает то же самое при открытии и на каждом опросе — это
+  // страховка на случай выхода раньше первого запроса.)
   const prevScreenRef = useRef<Screen["name"]>(screen.name);
   useEffect(() => {
     const prev = prevScreenRef.current;
     prevScreenRef.current = screen.name;
-    if (prev === "chat" && screen.name !== "chat" && token) {
-      (async () => {
-        try {
-          const anchor = await getChatLastSeen();
-          if (anchor) {
-            const data = await api.chatMessages(token, anchor);
-            if (data && data.length > 0) {
-              // Сообщения пришли пока пользователь был в чате —
-              // он их видел, якорь移到 их максимальный createdAt
-              await markChatRead(data[data.length - 1].createdAt);
-            }
-          } else {
-            // Якоря нет — ставим на «сейчас»
-            await markChatRead(new Date().toISOString());
-          }
-        } catch {
-          // Offline — оставляем якорь как есть
-        }
-        pollChatUnread();
-      })();
-    }
-  }, [screen.name, pollChatUnread]);
+    if (prev !== "chat" || screen.name === "chat" || !token) return;
+    setChatUnread(0);
+    markAllChatRead(token).catch(() => {
+      // Офлайн — счётчик пересчитается с сервера на следующем опросе
+    });
+  }, [screen.name, token]);
 
   // Плавный fade при смене экрана (переключение табов и открытие экранов)
   useEffect(() => {
@@ -259,8 +247,9 @@ export default function App() {
         setScreen({ name: "scan" });
         break;
       case "chat":
-        // Открыли чат — бейдж НЕ обнуляем: он обновится сам, когда
-        // ChatScreen обновит якорь прочтения, и исчезнет при выходе.
+        // Открываем чат — сразу гасим бейдж (дальше экран чата помечает
+        // сообщения прочитанными на сервере и держит счётчик на нуле).
+        setChatUnread(0);
         setScreen({ name: "chat" });
         break;
       case "about":
@@ -284,11 +273,19 @@ export default function App() {
   };
 
   let content: ReactNode;
-  if (loading) {
+  if (loading || introMode === null) {
     content = (
       <View style={styles.center}>
         <StatusBar style="light" />
         <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  } else if (!introDone) {
+    // Заставка при входе: камера осматривает площадку и наезжает на экран
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <IntroSplash mode={introMode} onDone={handleIntroDone} />
       </View>
     );
   } else if (!token) {
@@ -348,7 +345,12 @@ export default function App() {
     content = (
       <View style={styles.root}>
         <StatusBar style="light" />
-        <ChatScreen token={token} onBack={() => setScreen({ name: "leads" })} />
+        <ChatScreen
+          token={token}
+          // Открытые сообщения сразу считаются прочитанными — бейдж гаснет
+          onRead={() => setChatUnread(0)}
+          onBack={() => setScreen({ name: "leads" })}
+        />
       </View>
     );
   } else if (screen.name === "reviews") {

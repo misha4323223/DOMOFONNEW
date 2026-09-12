@@ -513,6 +513,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.json(messages);
   }));
 
+  // Сколько сообщений чата ещё не прочитано. Якорь прочтения живёт на сервере,
+  // поэтому счётчик одинаков на всех устройствах и не зависит от часов телефона.
+  app.get("/api/chat/unread", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
+    const unread = await storage.getChatUnread();
+    return res.json(unread);
+  }));
+
+  // Явная пометка «все сообщения чата прочитаны»: сервер сдвигает якорь на
+  // последнее сообщение, счётчик обнуляется и снова растёт только с новых.
+  app.post("/api/chat/read", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
+    const unread = await storage.markChatRead();
+    return res.json(unread);
+  }));
+
   // Фото в чате: сжатый data-url jpeg/png/webp. Лимит ~300 КБ base64
   // (у записи YDB свой лимит ~400 КБ, запас на остальные поля).
   const MAX_CHAT_IMAGE_LENGTH = 300_000;

@@ -15,6 +15,8 @@ import {
   unlinkYdbNotesByLead,
   sendYdbChatMessage,
   listYdbChatMessages,
+  getYdbChatUnread,
+  markYdbChatRead,
   updateYdbChatMessage,
   deleteYdbChatMessage,
   createYdbReview,
@@ -28,10 +30,14 @@ import {
   type NotePatch,
   type ChatMessage,
   type ChatMessageInput,
+  type ChatUnread,
   type Review,
   type ReviewInput,
   type ReviewStatus,
 } from "./ydb";
+
+/** Ключ настройки: createdAt последнего прочитанного сообщения чата. */
+const CHAT_LAST_READ_KEY = "chat:last-read";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -56,6 +62,10 @@ export interface IStorage {
   listChatMessages(after?: string): Promise<ChatMessage[]>;
   updateChatMessage(id: string, patch: { text?: string }): Promise<ChatMessage | undefined>;
   deleteChatMessage(id: string): Promise<boolean>;
+  /** Сколько сообщений чата непрочитано (якорь прочтения — на сервере). */
+  getChatUnread(): Promise<ChatUnread>;
+  /** Пометить все сообщения чата прочитанными (счётчик обнуляется). */
+  markChatRead(): Promise<ChatUnread>;
   // Отзывы клиентов (сайт + админка).
   createReview(review: ReviewInput): Promise<Review>;
   listReviews(): Promise<Review[]>;
@@ -210,6 +220,32 @@ export class MemStorage implements IStorage {
     };
     this.chat.set(message.id, message);
     return message;
+  }
+
+  async getChatUnread(): Promise<ChatUnread> {
+    if (this.useYdb) return getYdbChatUnread();
+    const messages = await this.listChatMessages();
+    const readAt = this.settings.get(CHAT_LAST_READ_KEY)?.value ?? null;
+    const lastMessageAt =
+      messages.length > 0 ? messages[messages.length - 1].createdAt : null;
+    return {
+      count: readAt ? messages.filter((m) => m.createdAt > readAt).length : 0,
+      readAt,
+      lastMessageAt,
+    };
+  }
+
+  async markChatRead(): Promise<ChatUnread> {
+    if (this.useYdb) return markYdbChatRead();
+    const messages = await this.listChatMessages();
+    const lastMessageAt =
+      messages.length > 0 ? messages[messages.length - 1].createdAt : null;
+    const readAt = lastMessageAt ?? new Date().toISOString();
+    this.settings.set(CHAT_LAST_READ_KEY, {
+      value: readAt,
+      updatedAt: new Date().toISOString(),
+    });
+    return { count: 0, readAt, lastMessageAt };
   }
 
   async listChatMessages(after?: string): Promise<ChatMessage[]> {

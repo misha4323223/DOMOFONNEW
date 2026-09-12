@@ -30,13 +30,15 @@ import {
   useSyncState,
 } from "../sync";
 import { getMyName, saveMyName } from "../profile";
-import { markChatRead } from "../unread";
+import { markAllChatRead } from "../unread";
 import { EmptyState } from "../components/EmptyState";
 import { ChatSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 
 interface Props {
   token: string;
+  /** Открытые сообщения прочитаны — можно обнулить бейдж на табе «Чат». */
+  onRead?: () => void;
   onBack: () => void;
 }
 
@@ -166,7 +168,7 @@ async function compressToDataUrl(uri: string): Promise<string | null> {
   return dataUrl;
 }
 
-export function ChatScreen({ token, onBack }: Props) {
+export function ChatScreen({ token, onRead, onBack }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [input, setInput] = useState("");
@@ -192,14 +194,28 @@ export function ChatScreen({ token, onBack }: Props) {
     })();
   }, []);
 
-  // При уходе с экрана чата фиксируем якорь прочтения — серверное время
-  // последнего увиденного сообщения (всё, что админ видел, не должно
-  // попасть в счётчик непрочитанных).
+  /**
+   * Пометить всё в чате прочитанным: сервер сдвигает якорь прочтения, счётчик
+   * непрочитанных обнуляется (и у самого экрана, и на бейдже таба), а новые
+   * сообщения снова начнут считаться.
+   */
+  const markRead = useCallback(async () => {
+    try {
+      await markAllChatRead(token);
+      onRead?.();
+    } catch {
+      // Офлайн — пометим при следующей удачной попытке
+    }
+  }, [token, onRead]);
+
+  // При уходе с экрана чата всё виденное — прочитано.
   useEffect(() => {
     return () => {
-      markChatRead(lastCreatedRef.current ?? null);
+      markAllChatRead(token).catch(() => {
+        // Офлайн — якорь обновится при следующем открытии чата
+      });
     };
-  }, []);
+  }, [token]);
 
   /** Обновить список сообщений (полная перезагрузка). */
   const loadAll = useCallback(async () => {
@@ -210,8 +226,8 @@ export function ChatScreen({ token, onBack }: Props) {
       // больше не нужны (flushPending уже отправил их).
       setPending([]);
       lastCreatedRef.current = data?.[data.length - 1]?.createdAt;
-      // Чат открыт — якорь прочтения = серверное время последнего сообщения
-      markChatRead(lastCreatedRef.current ?? null);
+      // Чат открыт — всё показанное помечаем прочитанным
+      await markRead();
       setIsOffline(false);
       await flushPending(token);
     } catch (e) {
@@ -219,7 +235,7 @@ export function ChatScreen({ token, onBack }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, markRead]);
 
   /** Догрузить только новые сообщения (после последнего). */
   const poll = useCallback(async () => {
@@ -234,16 +250,16 @@ export function ChatScreen({ token, onBack }: Props) {
         lastCreatedRef.current = data[data.length - 1].createdAt;
       }
       setIsOffline(false);
-      // Чат открыт и просматривается — якорь прочтения держим на серверном
-      // времени последнего сообщения, чтобы счётчик на табе обнулялся
-      markChatRead(lastCreatedRef.current ?? null);
+      // Чат открыт и просматривается — держим всё прочитанным, чтобы
+      // счётчик на табе не показывал сообщения, которые админ уже видит
+      await markRead();
       // Подтягиваем актуальный список «ожидающих» — отправленные уходят из него
       const queued = await pendingChatClientIds();
       setPending((prev) => prev.filter((p) => queued.includes(p.clientId)));
     } catch {
       setIsOffline(true);
     }
-  }, [token]);
+  }, [token, markRead]);
 
   useEffect(() => {
     loadAll();
