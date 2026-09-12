@@ -363,8 +363,9 @@ const styles = StyleSheet.create({
   cardPhoneWrap: {
     flex: 1,
   },
+  // Номер телефона — зелёный, как кнопка «Позвонить» в списке заявок
   cardPhone: {
-    color: colors.primary,
+    color: "#4ade80",
     fontSize: 15,
     fontWeight: "700",
     flex: 1,

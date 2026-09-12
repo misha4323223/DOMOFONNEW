@@ -445,7 +445,7 @@ export function LeadsScreen({ token, onEdit }: Props) {
               📍 {item.address}
             </Text>
             <View style={styles.routeButton}>
-              <Ionicons name="navigate" size={12} color={colors.primary} />
+              <Ionicons name="navigate" size={12} color={colors.text} />
               <Text style={styles.routeButtonText}>Маршрут</Text>
             </View>
           </Pressable>
@@ -520,11 +520,7 @@ export function LeadsScreen({ token, onEdit }: Props) {
                 onPress={() => callPhone(item.phone)}
                 hitSlop={6}
               >
-                <Ionicons
-                  name="call"
-                  size={13}
-                  color={colors.primaryForeground}
-                />
+                <Ionicons name="call" size={13} color="#4ade80" />
                 <Text style={styles.callButtonText}>Позвонить</Text>
               </Pressable>
             ) : null}
@@ -817,15 +813,15 @@ const styles = StyleSheet.create({
   },
   // Метка «Вручную»: заявку добавил админ через «+ Добавить», а не клиент с сайта
   manualBadge: {
-    backgroundColor: "rgba(245,162,11,0.14)",
+    backgroundColor: "rgba(212,212,212,0.12)",
     borderRadius: 7,
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderWidth: 1,
-    borderColor: "rgba(245,162,11,0.45)",
+    borderColor: "rgba(212,212,212,0.35)",
   },
   manualBadgeText: {
-    color: "#f5a20b",
+    color: "#d4d4d4",
     fontSize: 10,
     fontWeight: "700",
   },
@@ -849,8 +845,9 @@ const styles = StyleSheet.create({
   cardPhoneWrap: {
     flex: 1,
   },
+  // Номер телефона — того же зелёного цвета, что и кнопка «Позвонить»
   cardPhone: {
-    color: colors.primary,
+    color: "#4ade80",
     fontSize: 15,
     fontWeight: "700",
     flex: 1,
@@ -928,6 +925,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 14,
   },
+  // Кнопка маршрута — белая, в цвет адреса рядом с ней
   routeButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -935,12 +933,12 @@ const styles = StyleSheet.create({
     borderRadius: 7,
     paddingHorizontal: 8,
     paddingVertical: 3,
-    backgroundColor: "rgba(245,162,11,0.12)",
+    backgroundColor: colors.inputBg,
     borderWidth: 1,
-    borderColor: "rgba(245,162,11,0.45)",
+    borderColor: "rgba(245,245,245,0.28)",
   },
   routeButtonText: {
-    color: colors.primary,
+    color: colors.text,
     fontSize: 11,
     fontWeight: "700",
   },
@@ -977,6 +975,7 @@ const styles = StyleSheet.create({
     gap: 6,
     flexShrink: 0,
   },
+  // Кнопка звонка — в зелёный цвет статуса «Выполнена»
   callButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -984,10 +983,12 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    backgroundColor: colors.primary,
+    backgroundColor: "rgba(34,197,94,0.18)",
+    borderWidth: 1,
+    borderColor: "#22c55e",
   },
   callButtonText: {
-    color: colors.primaryForeground,
+    color: "#4ade80",
     fontSize: 12,
     fontWeight: "800",
   },

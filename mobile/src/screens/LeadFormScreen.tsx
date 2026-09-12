@@ -407,11 +407,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
               onPress={() => callPhone(phone)}
               hitSlop={4}
             >
-              <Ionicons
-                name="call"
-                size={18}
-                color={colors.primaryForeground}
-              />
+              <Ionicons name="call" size={18} color="#4ade80" />
             </Pressable>
           ) : null}
         </View>
@@ -466,7 +462,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             }
             hitSlop={4}
           >
-            <Ionicons name="navigate" size={14} color={colors.primary} />
+            <Ionicons name="navigate" size={14} color={colors.text} />
             <Text style={styles.routeRowText}>
               Открыть адрес в навигаторе
             </Text>
@@ -595,16 +591,19 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingBottom: 40,
   },
-  // Кнопка «позвонить» справа от поля телефона
+  // Кнопка «позвонить» справа от поля телефона — в зелёный цвет статуса «Выполнена»
   callButton: {
     width: 46,
     height: 46,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: colors.primary,
+    backgroundColor: "rgba(34,197,94,0.18)",
+    borderWidth: 1,
+    borderColor: "#22c55e",
   },
   // Кнопка «открыть адрес в навигаторе» под полем адреса
+  // Кнопка «открыть адрес в навигаторе» под полем адреса — белая, в цвет адреса
   routeRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -614,12 +613,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 7,
     marginTop: 2,
-    backgroundColor: "rgba(245,162,11,0.12)",
+    backgroundColor: colors.inputBg,
     borderWidth: 1,
-    borderColor: "rgba(245,162,11,0.45)",
+    borderColor: "rgba(245,245,245,0.28)",
   },
   routeRowText: {
-    color: colors.primary,
+    color: colors.text,
     fontSize: 13,
     fontWeight: "700",
   },
