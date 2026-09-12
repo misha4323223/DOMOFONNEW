@@ -66,12 +66,18 @@ EAS Update.
    ```bash
    # превью-канал (APK, собранные профилем preview) — обычно это наш случай
    EXPO_TOKEN="<токен>" npx eas-cli update --channel preview --environment preview \
-     --non-interactive --message "Краткое описание правки"
+     --platform android --non-interactive --message "Краткое описание правки"
 
    # прод-канал (APK, собранные профилем production)
    EXPO_TOKEN="<токен>" npx eas-cli update --channel production --environment production \
-     --non-interactive --message "Описание правки"
+     --platform android --non-interactive --message "Описание правки"
    ```
+
+   `--platform android` обязателен: приложение только под Android (это же
+   объявлено в `app.json` — `"platforms": ["android"]`). Без флага свежий
+   `eas-cli` пробует собрать ещё и web-бандл, а web-зависимостей
+   (`react-native-web`) в проекте нет — экспорт падает с «It looks like you're
+   trying to use web support…».
 
 4. **Сверить runtime version**: в выводе команды будет `Runtime version`
    (политика `fingerprint`). Оно должно совпадать с runtime version
@@ -90,6 +96,8 @@ EAS Update.
   наоборот) — приложение молчит, «очереди у Expo» нет, дело в канале.
 - `EXPO_TOKEN` не задан — EAS просит вход.
 - Забыли `--environment` — EAS требует его в `--non-interactive`.
+- Забыли `--platform android` — `eas update` ушёл собирать web-бандл и упал
+  на экспорте (web в проекте не поддержан, см. шаг 3 выше).
 
 Важно: OTA заработает только на APK, **собранных после** этих изменений
 (в `eas.json` у профилей `preview`/`production` уже прописаны `channel`, в

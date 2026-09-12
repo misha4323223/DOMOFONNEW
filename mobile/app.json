@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
+    "platforms": ["android"],
     "runtimeVersion": "a772a6b21e2389d8ea748177f1eae75a99887742",
     "updates": {
       "url": "https://u.expo.dev/01a13674-a633-47ca-ae30-865da95251c1",
