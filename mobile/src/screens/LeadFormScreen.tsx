@@ -31,6 +31,8 @@ import {
 } from "../api";
 import { queueLeadCreate, queueLeadUpdate } from "../sync";
 import { colors } from "../theme";
+import { CRITICAL_DAYS, STALE_DAYS, staleInfo } from "../leadAge";
+import { buildAddressQuery, openAddressInNavigator } from "../maps";
 
 interface Props {
   token: string;
@@ -268,6 +270,9 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
   // Новая заявка всегда ручная; клиентские заявки с сайта — по полю source.
   const isCityField = !lead || lead.source === "admin";
 
+  // Заявка висит больше недели — предупреждаем прямо в форме
+  const stale = lead ? staleInfo(lead) : null;
+
   return (
     <SafeAreaView style={styles.root}>
       <KeyboardAvoidingView
@@ -288,6 +293,33 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
+        {/* Предупреждение: заявка висит больше недели */}
+        {stale ? (
+          <View
+            style={[
+              styles.staleCard,
+              stale.level === "critical" && styles.staleCardCritical,
+            ]}
+          >
+            <Ionicons
+              name={stale.level === "critical" ? "alert-circle" : "time-outline"}
+              size={17}
+              color={stale.level === "critical" ? "#f87171" : "#fbbf24"}
+            />
+            <Text
+              style={[
+                styles.staleCardText,
+                stale.level === "critical" && styles.staleCardTextCritical,
+              ]}
+            >
+              Заявка {stale.text}.{" "}
+              {stale.level === "critical"
+                ? `Клиент ждёт больше ${CRITICAL_DAYS} дней — свяжитесь с ним сегодня.`
+                : `Пора связаться с клиентом (порог — ${STALE_DAYS} дней).`}
+            </Text>
+          </View>
+        ) : null}
+
         {/* Голосовой ввод: надиктовали фразу — поля заполнились сами */}
         <View style={styles.dictationCard}>
           <Pressable
@@ -396,6 +428,35 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             placeholderTextColor={colors.textMuted}
           />
         </View>
+        {/* Проверить адрес до выезда: тап — открывается навигатор */}
+        {address.trim() ? (
+          <Pressable
+            style={({ pressed }) => [
+              styles.routeRow,
+              pressed && { opacity: 0.7 },
+            ]}
+            onPress={() => {
+              // У ручных заявок в поле «город» лежит название города
+              const query = buildAddressQuery(
+                address,
+                isCityField ? name : undefined,
+              );
+              openAddressInNavigator(query).then((ok) => {
+                if (!ok) {
+                  setError(
+                    "Не удалось открыть карты — на устройстве нет приложения с картами",
+                  );
+                }
+              });
+            }}
+            hitSlop={4}
+          >
+            <Ionicons name="navigate" size={14} color={colors.primary} />
+            <Text style={styles.routeRowText}>
+              Открыть адрес в навигаторе
+            </Text>
+          </Pressable>
+        ) : null}
 
         <Text style={styles.label}>Комментарий</Text>
         <View style={styles.fieldRow}>
@@ -515,6 +576,51 @@ const styles = StyleSheet.create({
     padding: 20,
     gap: 8,
     paddingBottom: 40,
+  },
+  // Кнопка «открыть адрес в навигаторе» под полем адреса
+  routeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    marginTop: 2,
+    backgroundColor: "rgba(245,162,11,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(245,162,11,0.45)",
+  },
+  routeRowText: {
+    color: colors.primary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  // Предупреждение о том, что заявка висит больше недели
+  staleCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: "rgba(245,158,11,0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.45)",
+  },
+  staleCardCritical: {
+    backgroundColor: "rgba(239,68,68,0.14)",
+    borderColor: "rgba(239,68,68,0.5)",
+  },
+  staleCardText: {
+    flex: 1,
+    color: "#fbbf24",
+    fontSize: 13,
+    fontWeight: "600",
+    lineHeight: 18,
+  },
+  staleCardTextCritical: {
+    color: "#f87171",
   },
   label: {
     color: colors.textMuted,

@@ -31,6 +31,7 @@ import {
   Lock,
   LogOut,
   MessageSquareQuote,
+  Navigation,
   RefreshCw,
   Star,
   Trash2,
@@ -48,6 +49,14 @@ interface SiteReview {
   /** Ответ службы на отзыв; пусто — ответа нет. */
   reply: string;
   createdAt: string;
+}
+
+/**
+ * Ссылка на Яндекс Карты с готовым маршрутом до адреса заявки
+ * (от текущего местоположения — открывается навигатор, можно сразу ехать).
+ */
+function mapsRouteUrl(address: string): string {
+  return `https://yandex.ru/maps/?rtext=~${encodeURIComponent(address.trim())}&rtt=auto`;
 }
 
 const SERVICE_LABELS: Record<string, string> = {
@@ -296,7 +305,20 @@ function LeadsBoard() {
                     >
                       {lead.phone}
                     </a>
-                    <p className="text-sm">{lead.address}</p>
+                    {lead.address ? (
+                      <a
+                        href={mapsRouteUrl(lead.address)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm flex items-start gap-1.5 text-primary hover:underline"
+                        title={`Маршрут: ${lead.address}`}
+                      >
+                        <Navigation className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                        {lead.address}
+                      </a>
+                    ) : (
+                      <p className="text-sm">{lead.address}</p>
+                    )}
                     {lead.comment && (
                       <p className="text-sm text-muted-foreground">
                         {lead.comment}
@@ -351,11 +373,19 @@ function LeadsBoard() {
                         <TableCell>
                           <StatusChips lead={lead} onPatch={setStatus} />
                         </TableCell>
-                        <TableCell
-                          className="max-w-[220px] truncate"
-                          title={lead.address}
-                        >
-                          {lead.address}
+                        <TableCell className="max-w-[220px]">
+                          {lead.address ? (
+                            <a
+                              href={mapsRouteUrl(lead.address)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-primary hover:underline flex items-center gap-1.5"
+                              title={`Маршрут: ${lead.address}`}
+                            >
+                              <Navigation className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">{lead.address}</span>
+                            </a>
+                          ) : null}
                         </TableCell>
                         <TableCell className="max-w-[240px] text-muted-foreground">
                           {lead.comment || "—"}

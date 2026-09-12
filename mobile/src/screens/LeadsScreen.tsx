@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Linking,
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Notifications from "expo-notifications";
 import Constants from "expo-constants";
 import {
@@ -35,10 +38,44 @@ import {
 import { EmptyState } from "../components/EmptyState";
 import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
+import {
+  CRITICAL_DAYS,
+  STALE_DAYS,
+  leadsWord,
+  staleInfo,
+  staleSummary,
+} from "../leadAge";
+import { buildAddressQuery, openAddressInNavigator } from "../maps";
 
 interface Props {
   token: string;
   onEdit: (lead: Lead) => void;
+}
+
+/**
+ * Привести строку к виду, удобному для поиска: нижний регистр, «ё» → «е».
+ * Так «Ефремов» находится по запросу «ефремов», а «Ёлкин» — по «елкин».
+ */
+function forSearch(value: string): string {
+  return value.toLowerCase().replace(/ё/g, "е");
+}
+
+/** Только цифры: по ним ищем телефон, как бы он ни был записан. */
+function digits(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+/** Позвонить клиенту прямо из предупреждения о зависшей заявке. */
+function callPhone(phone: string) {
+  // Приводим номер к формату +7XXXXXXXXXX: пишут и «8 905…», и «+7 905…».
+  let digits10 = phone.replace(/\D/g, "");
+  if (digits10.length === 11 && digits10.startsWith("8")) digits10 = `7${digits10.slice(1)}`;
+  if (digits10.length === 10) digits10 = `7${digits10}`;
+  // Номер короче 11 цифр — звонить некуда, оставляем как есть
+  if (digits10.length < 11) return;
+  Linking.openURL(`tel:+${digits10}`).catch(() => {
+    // На устройстве нет звонилки — молча пропускаем
+  });
 }
 
 function formatDate(iso: string): string {
@@ -94,6 +131,62 @@ export function LeadsScreen({ token, onEdit }: Props) {
 
   // Активные заявки — без ушедших в архив (archived === "1")
   const activeLeads = leads.filter((l) => l.archived !== "1");
+
+  // Поиск по заявкам: имя/город, телефон, адрес, услуга, комментарий, заметки
+  const [query, setQuery] = useState("");
+  // Фильтр «только зависшие» — включается тапом по баннеру-предупреждению
+  const [overdueOnly, setOverdueOnly] = useState(false);
+
+  // Актуальные заметки, сгруппированные по заявке: нужны и для карточек,
+  // и для поиска (в заметках часто адрес и детали заказа).
+  const notesByLead = useMemo(() => {
+    const map: Record<string, Note[]> = {};
+    for (const note of notes) {
+      if (!note.leadId || note.done === "1") continue;
+      const list = map[note.leadId];
+      if (list) list.push(note);
+      else map[note.leadId] = [note];
+    }
+    return map;
+  }, [notes]);
+
+  // Сколько заявок висит больше недели (и сколько — больше двух)
+  const staleStats = useMemo(() => staleSummary(activeLeads), [activeLeads]);
+
+  /** Заявки с учётом поиска и фильтра «зависшие». */
+  const visibleLeads = useMemo(() => {
+    const q = forSearch(query.trim());
+    const qDigits = digits(query);
+    const found = activeLeads.filter((lead) => {
+      if (overdueOnly && !staleInfo(lead)) return false;
+      if (!q) return true;
+      const notesText = (notesByLead[lead.id] ?? []).map((n) => n.text).join(" ");
+      const haystack = forSearch(
+        [
+          lead.name,
+          lead.address,
+          lead.comment ?? "",
+          serviceLabel(lead.service),
+          lead.phone ?? "",
+          notesText,
+        ].join(" "),
+      );
+      if (haystack.includes(q)) return true;
+      // Телефон ищем ещё и по цифрам: «8905113…» найдёт «+7 905 113 …»
+      return qDigits.length >= 3 && digits(lead.phone ?? "").includes(qDigits);
+    });
+
+    // Зависшие — наверх (самые старые первыми): их и надо разобрать раньше.
+    // Остальные — как обычно, свежие сверху.
+    return found.sort((a, b) => {
+      const ra = staleInfo(a) ? 0 : 1;
+      const rb = staleInfo(b) ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+      const ta = new Date(a.createdAt).getTime() || 0;
+      const tb = new Date(b.createdAt).getTime() || 0;
+      return ra === 0 ? ta - tb : tb - ta;
+    });
+  }, [activeLeads, query, overdueOnly, notesByLead]);
 
   // После успешной отправки очереди (появился интернет) — перечитываем список,
   // чтобы локальные id созданных офлайн заявок заменились на настоящие.
@@ -202,6 +295,23 @@ export function LeadsScreen({ token, onEdit }: Props) {
     return [base, styles.statusChipNew];
   };
 
+  /**
+   * Открыть адрес заявки в навигаторе.
+   * У ручных заявок в поле «имя» лежит город — подставляем его к улице.
+   */
+  const openRoute = (lead: Lead) => {
+    const city = lead.source === "admin" ? lead.name : undefined;
+    const query = buildAddressQuery(lead.address, city);
+    openAddressInNavigator(query).then((ok) => {
+      if (!ok) {
+        Alert.alert(
+          "Не удалось открыть карты",
+          "Похоже, на устройстве нет приложения с картами. Установите Яндекс Карты или Навигатор.",
+        );
+      }
+    });
+  };
+
   const statusChipTextStyle = (active: boolean, value: LeadStatus) => {
     if (!active) return styles.statusChipText;
     if (value === "urgent") return [styles.statusChipText, styles.statusChipTextUrgent];
@@ -293,10 +403,11 @@ export function LeadsScreen({ token, onEdit }: Props) {
   const renderCard = ({ item }: { item: Lead }) => {
     const status = item.status ?? "new";
     // Актуальные (невыполненные) заметки, привязанные к этой заявке
-    const leadNotes = notes
-      .filter((n) => n.leadId === item.id && n.done !== "1")
-      .slice(0, 3);
-    const leadNotesTotal = notes.filter((n) => n.leadId === item.id && n.done !== "1").length;
+    const leadNotesAll = notesByLead[item.id] ?? [];
+    const leadNotes = leadNotesAll.slice(0, 3);
+    const leadNotesTotal = leadNotesAll.length;
+    // Если заявка висит больше недели — показываем предупреждение
+    const stale = staleInfo(item);
     return (
       <Pressable
         style={({ pressed }) => [
@@ -320,7 +431,64 @@ export function LeadsScreen({ token, onEdit }: Props) {
           </View>
           <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
         </View>
-        <Text style={styles.cardAddress}>📍 {item.address}</Text>
+        {/* Предупреждение: заявка висит больше недели — пора звонить клиенту */}
+        {stale ? (
+          <View
+            style={[
+              styles.staleRow,
+              stale.level === "critical" && styles.staleRowCritical,
+            ]}
+          >
+            <Ionicons
+              name={stale.level === "critical" ? "alert-circle" : "time-outline"}
+              size={13}
+              color={stale.level === "critical" ? "#f87171" : "#fbbf24"}
+            />
+            <Text
+              style={[
+                styles.staleRowText,
+                stale.level === "critical" && styles.staleRowTextCritical,
+              ]}
+              numberOfLines={1}
+            >
+              Заявка {stale.text}
+            </Text>
+            {item.phone ? (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.staleCall,
+                  pressed && { opacity: 0.7 },
+                ]}
+                onPress={() => callPhone(item.phone)}
+                hitSlop={6}
+              >
+                <Ionicons name="call" size={12} color={colors.primary} />
+                <Text style={styles.staleCallText}>Позвонить</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+        {/* Адрес — тап открывает навигатор: нажал и едешь */}
+        {item.address.trim() ? (
+          <Pressable
+            style={({ pressed }) => [
+              styles.addressRow,
+              pressed && { opacity: 0.7 },
+            ]}
+            onPress={() => openRoute(item)}
+            hitSlop={4}
+          >
+            <Text style={styles.cardAddress} numberOfLines={2}>
+              📍 {item.address}
+            </Text>
+            <View style={styles.routeButton}>
+              <Ionicons name="navigate" size={12} color={colors.primary} />
+              <Text style={styles.routeButtonText}>Маршрут</Text>
+            </View>
+          </Pressable>
+        ) : (
+          <Text style={styles.cardAddress}>📍 {item.address}</Text>
+        )}
         <View style={styles.cardRow}>
           <Text
             style={[styles.cardPhone, !item.phone && styles.cardPhoneMissing]}
@@ -386,14 +554,82 @@ export function LeadsScreen({ token, onEdit }: Props) {
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
         <View style={styles.headerTop}>
-          <View>
+          <View style={styles.headerLeft}>
             <Text style={styles.headerTitle}>Заявки</Text>
-            <Text style={styles.headerCount}>
-              {activeLeads.length > 0 ? `${activeLeads.length} шт.` : " "}
+            <Text style={styles.headerCount} numberOfLines={1}>
+              {query.trim()
+                ? `Найдено: ${visibleLeads.length} из ${activeLeads.length}`
+                : activeLeads.length > 0
+                  ? `${activeLeads.length} шт.`
+                  : " "}
             </Text>
+          </View>
+
+          {/* Поиск по заявкам: имя/город, адрес, телефон, услуга, комментарий */}
+          <View style={styles.search}>
+            <Ionicons name="search" size={15} color={colors.textMuted} />
+            <TextInput
+              style={styles.searchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Поиск"
+              placeholderTextColor={colors.textMuted}
+              selectionColor={colors.primary}
+              autoCorrect={false}
+              autoCapitalize="none"
+              returnKeyType="search"
+            />
+            {query.length > 0 ? (
+              <Pressable onPress={() => setQuery("")} hitSlop={8}>
+                <Ionicons
+                  name="close-circle"
+                  size={16}
+                  color={colors.textMuted}
+                />
+              </Pressable>
+            ) : null}
           </View>
         </View>
       </View>
+
+      {/* Предупреждение о заявках, которые висят больше недели.
+          Тап по плашке оставляет в списке только их. */}
+      {staleStats.count > 0 ? (
+        <Pressable
+          style={({ pressed }) => [
+            styles.staleBanner,
+            staleStats.critical > 0 && styles.staleBannerCritical,
+            pressed && { opacity: 0.85 },
+          ]}
+          onPress={() => setOverdueOnly((v) => !v)}
+        >
+          <Ionicons
+            name={staleStats.critical > 0 ? "alert-circle" : "time-outline"}
+            size={17}
+            color={staleStats.critical > 0 ? "#f87171" : "#fbbf24"}
+          />
+          <Text
+            style={[
+              styles.staleBannerText,
+              staleStats.critical > 0 && styles.staleBannerTextCritical,
+            ]}
+          >
+            {staleStats.critical > 0
+              ? `${staleStats.critical} ${leadsWord(staleStats.critical)} ` +
+                `${staleStats.critical === 1 ? "висит" : "висят"} больше ${CRITICAL_DAYS} дней`
+              : `${staleStats.count} ${leadsWord(staleStats.count)} ` +
+                `${staleStats.count === 1 ? "висит" : "висят"} больше ${STALE_DAYS} дней`}
+          </Text>
+          <Text
+            style={[
+              styles.staleBannerAction,
+              staleStats.critical > 0 && styles.staleBannerTextCritical,
+            ]}
+          >
+            {overdueOnly ? "Все" : "Показать"}
+          </Text>
+        </Pressable>
+      ) : null}
 
       {/* Плашка офлайн-режима / ожидающих отправки изменений */}
       {(isOffline || pendingCount > 0) && (
@@ -417,10 +653,12 @@ export function LeadsScreen({ token, onEdit }: Props) {
         </View>
       ) : (
         <FlatList
-          data={activeLeads}
+          data={visibleLeads}
           keyExtractor={(item) => item.id}
           renderItem={renderCard}
           contentContainerStyle={styles.list}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -429,11 +667,23 @@ export function LeadsScreen({ token, onEdit }: Props) {
             />
           }
           ListEmptyComponent={
-            <EmptyState
-              iconName="clipboard-outline"
-              title="Заявок пока нет"
-              hint="Новые заявки с сайта появятся здесь автоматически"
-            />
+            query.trim() || overdueOnly ? (
+              <EmptyState
+                iconName="search-outline"
+                title="Ничего не найдено"
+                hint={
+                  query.trim()
+                    ? `По запросу «${query.trim()}» заявок нет`
+                    : "Заявок старше недели нет — всё разобрано"
+                }
+              />
+            ) : (
+              <EmptyState
+                iconName="clipboard-outline"
+                title="Заявок пока нет"
+                hint="Новые заявки с сайта появятся здесь автоматически"
+              />
+            )
           }
         />
       )}
@@ -458,6 +708,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: 10,
+  },
+  headerLeft: {
+    // Сжимается, но не выталкивает поиск за край экрана
+    flexShrink: 1,
   },
   headerTitle: {
     color: colors.text,
@@ -467,6 +722,59 @@ const styles = StyleSheet.create({
   headerCount: {
     color: colors.textMuted,
     fontSize: 13,
+  },
+  // Поле поиска в шапке (справа от заголовка)
+  search: {
+    flex: 1,
+    maxWidth: 210,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    height: 36,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: colors.inputBg,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  searchInput: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 14,
+    // Android добавляет свои внутренние отступы — убираем, чтобы текст
+    // стоял по центру поля
+    padding: 0,
+    height: 36,
+  },
+  // Плашка-предупреждение о зависших заявках
+  staleBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: "rgba(245,158,11,0.14)",
+    borderBottomWidth: 1,
+    borderBottomColor: "#f59e0b",
+  },
+  staleBannerCritical: {
+    backgroundColor: "rgba(239,68,68,0.16)",
+    borderBottomColor: colors.destructive,
+  },
+  staleBannerText: {
+    flex: 1,
+    color: "#fbbf24",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  staleBannerTextCritical: {
+    color: "#f87171",
+  },
+  staleBannerAction: {
+    color: "#fbbf24",
+    fontSize: 12,
+    fontWeight: "700",
+    opacity: 0.9,
   },
   list: {
     padding: 14,
@@ -603,9 +911,75 @@ const styles = StyleSheet.create({
   statusChipTextDone: {
     color: "#4ade80",
   },
+  // Адрес + кнопка «в навигатор»: тап по всей строке открывает карты
+  addressRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 2,
+  },
   cardAddress: {
+    flex: 1,
     color: colors.text,
     fontSize: 14,
+  },
+  routeButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderRadius: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: "rgba(245,162,11,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(245,162,11,0.45)",
+  },
+  routeButtonText: {
+    color: colors.primary,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  // Строка-предупреждение внутри карточки зависшей заявки
+  staleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 2,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: "rgba(245,158,11,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.4)",
+  },
+  staleRowCritical: {
+    backgroundColor: "rgba(239,68,68,0.12)",
+    borderColor: "rgba(239,68,68,0.45)",
+  },
+  staleRowText: {
+    flex: 1,
+    color: "#fbbf24",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  staleRowTextCritical: {
+    color: "#f87171",
+  },
+  staleCall: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderRadius: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: colors.inputBg,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  staleCallText: {
+    color: colors.primary,
+    fontSize: 11,
+    fontWeight: "700",
   },
   notesBlock: {
     gap: 2,
