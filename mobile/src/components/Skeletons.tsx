@@ -105,8 +105,11 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.cardBorder,
+    // Полоски по бокам — как у настоящей карточки заявки
     borderLeftWidth: 4,
     borderLeftColor: "rgba(245,162,11,0.35)",
+    borderRightWidth: 4,
+    borderRightColor: "rgba(245,162,11,0.35)",
     padding: 12,
     gap: 8,
   },

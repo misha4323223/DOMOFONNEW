@@ -33,6 +33,7 @@ import { queueLeadCreate, queueLeadUpdate } from "../sync";
 import { colors } from "../theme";
 import { CRITICAL_DAYS, STALE_DAYS, staleInfo } from "../leadAge";
 import { useRouteCity } from "../components/CityPicker";
+import { callPhone } from "../phone";
 
 interface Props {
   token: string;
@@ -396,6 +397,23 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             placeholderTextColor={colors.textMuted}
             keyboardType="phone-pad"
           />
+          {/* Позвонить можно сразу из формы, не выходя в список */}
+          {phone.trim() ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.callButton,
+                pressed && { opacity: 0.85 },
+              ]}
+              onPress={() => callPhone(phone)}
+              hitSlop={4}
+            >
+              <Ionicons
+                name="call"
+                size={18}
+                color={colors.primaryForeground}
+              />
+            </Pressable>
+          ) : null}
         </View>
 
         <Text style={styles.label}>Услуга</Text>
@@ -576,6 +594,15 @@ const styles = StyleSheet.create({
     padding: 20,
     gap: 8,
     paddingBottom: 40,
+  },
+  // Кнопка «позвонить» справа от поля телефона
+  callButton: {
+    width: 46,
+    height: 46,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
   },
   // Кнопка «открыть адрес в навигаторе» под полем адреса
   routeRow: {

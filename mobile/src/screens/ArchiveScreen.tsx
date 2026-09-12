@@ -21,6 +21,7 @@ import { queueLeadDelete, queueLeadUpdate } from "../sync";
 import { EmptyState } from "../components/EmptyState";
 import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
+import { callPhone } from "../phone";
 
 interface Props {
   token: string;
@@ -138,7 +139,12 @@ export function ArchiveScreen({ token, onBack }: Props) {
   };
 
   const renderCard = ({ item }: { item: Lead }) => (
-    <View style={[styles.card, { borderLeftColor: "#22c55e" }]}>
+    <View
+      style={[
+        styles.card,
+        { borderLeftColor: "#22c55e", borderRightColor: "#22c55e" },
+      ]}
+    >
       <View style={styles.cardHeader}>
         <Text style={styles.cardName}>{item.name}</Text>
         <View style={styles.doneBadge}>
@@ -147,12 +153,25 @@ export function ArchiveScreen({ token, onBack }: Props) {
       </View>
       <Text style={styles.cardAddress}>📍 {item.address}</Text>
       <View style={styles.cardRow}>
-        <Text
-          style={[styles.cardPhone, !item.phone && styles.cardPhoneMissing]}
-          numberOfLines={1}
-        >
-          {item.phone ? `📞 ${item.phone}` : "📞 Без телефона"}
-        </Text>
+        {/* Номер нажимается: тап — и звонок */}
+        {item.phone ? (
+          <Pressable
+            style={({ pressed }) => [
+              styles.cardPhoneWrap,
+              pressed && { opacity: 0.7 },
+            ]}
+            onPress={() => callPhone(item.phone)}
+            hitSlop={4}
+          >
+            <Text style={styles.cardPhone} numberOfLines={1}>
+              📞 {item.phone}
+            </Text>
+          </Pressable>
+        ) : (
+          <Text style={[styles.cardPhone, styles.cardPhoneMissing]} numberOfLines={1}>
+            📞 Без телефона
+          </Text>
+        )}
         <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
       </View>
       {item.comment ? (
@@ -299,9 +318,11 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    // Зелёная полоска слева — карточка из архива (выполнена)
+    // Зелёные полоски по бокам — карточка из архива (выполнена)
     borderLeftWidth: 4,
     borderLeftColor: "#22c55e",
+    borderRightWidth: 4,
+    borderRightColor: "#22c55e",
     padding: 12,
     gap: 5,
   },
@@ -337,6 +358,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     marginTop: 2,
+  },
+  // Обёртка номера: занимает свободное место перед датой
+  cardPhoneWrap: {
+    flex: 1,
   },
   cardPhone: {
     color: colors.primary,

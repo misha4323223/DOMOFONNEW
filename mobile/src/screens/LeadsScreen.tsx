@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
-  Linking,
   Pressable,
   RefreshControl,
   StyleSheet,
@@ -46,6 +45,7 @@ import {
   staleSummary,
 } from "../leadAge";
 import { useRouteCity } from "../components/CityPicker";
+import { callPhone } from "../phone";
 
 interface Props {
   token: string;
@@ -65,18 +65,6 @@ function digits(value: string): string {
   return value.replace(/\D/g, "");
 }
 
-/** Позвонить клиенту прямо из предупреждения о зависшей заявке. */
-function callPhone(phone: string) {
-  // Приводим номер к формату +7XXXXXXXXXX: пишут и «8 905…», и «+7 905…».
-  let digits10 = phone.replace(/\D/g, "");
-  if (digits10.length === 11 && digits10.startsWith("8")) digits10 = `7${digits10.slice(1)}`;
-  if (digits10.length === 10) digits10 = `7${digits10}`;
-  // Номер короче 11 цифр — звонить некуда, оставляем как есть
-  if (digits10.length < 11) return;
-  Linking.openURL(`tel:+${digits10}`).catch(() => {
-    // На устройстве нет звонилки — молча пропускаем
-  });
-}
 
 function formatDate(iso: string): string {
   try {
@@ -394,11 +382,13 @@ export function LeadsScreen({ token, onEdit }: Props) {
     const leadNotesTotal = leadNotesAll.length;
     // Если заявка висит больше недели — показываем предупреждение
     const stale = staleInfo(item);
+    // Цвет статуса — им подсвечены обе боковые полоски карточки
+    const accent = statusColor(status);
     return (
       <Pressable
         style={({ pressed }) => [
           styles.card,
-          { borderLeftColor: statusColor(status) },
+          { borderLeftColor: accent, borderRightColor: accent },
           status === "done" && styles.cardDone,
           pressed && { opacity: 0.8 },
         ]}
@@ -439,19 +429,6 @@ export function LeadsScreen({ token, onEdit }: Props) {
             >
               Заявка {stale.text}
             </Text>
-            {item.phone ? (
-              <Pressable
-                style={({ pressed }) => [
-                  styles.staleCall,
-                  pressed && { opacity: 0.7 },
-                ]}
-                onPress={() => callPhone(item.phone)}
-                hitSlop={6}
-              >
-                <Ionicons name="call" size={12} color={colors.primary} />
-                <Text style={styles.staleCallText}>Позвонить</Text>
-              </Pressable>
-            ) : null}
           </View>
         ) : null}
         {/* Адрес — тап открывает навигатор: нажал и едешь */}
@@ -476,12 +453,25 @@ export function LeadsScreen({ token, onEdit }: Props) {
           <Text style={styles.cardAddress}>📍 {item.address}</Text>
         )}
         <View style={styles.cardRow}>
-          <Text
-            style={[styles.cardPhone, !item.phone && styles.cardPhoneMissing]}
-            numberOfLines={1}
-          >
-            {item.phone ? `📞 ${item.phone}` : "📞 Без телефона ⚠"}
-          </Text>
+          {/* Номер тоже нажимается: тап — и звонок */}
+          {item.phone ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.cardPhoneWrap,
+                pressed && { opacity: 0.7 },
+              ]}
+              onPress={() => callPhone(item.phone)}
+              hitSlop={4}
+            >
+              <Text style={styles.cardPhone} numberOfLines={1}>
+                📞 {item.phone}
+              </Text>
+            </Pressable>
+          ) : (
+            <Text style={[styles.cardPhone, styles.cardPhoneMissing]} numberOfLines={1}>
+              📞 Без телефона ⚠
+            </Text>
+          )}
           <View style={styles.chip}>
             <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
           </View>
@@ -519,18 +509,38 @@ export function LeadsScreen({ token, onEdit }: Props) {
               );
             })}
           </View>
-          {status === "done" && (
-            <Pressable
-              style={({ pressed }) => [
-                styles.archiveButton,
-                pressed && { opacity: 0.8 },
-              ]}
-              onPress={() => confirmArchive(item)}
-              hitSlop={6}
-            >
-              <Text style={styles.archiveButtonText}>🗄 В архив</Text>
-            </Pressable>
-          )}
+          {/* Действия по заявке: позвонить можно с любой карточки */}
+          <View style={styles.footerActions}>
+            {item.phone ? (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.callButton,
+                  pressed && { opacity: 0.85 },
+                ]}
+                onPress={() => callPhone(item.phone)}
+                hitSlop={6}
+              >
+                <Ionicons
+                  name="call"
+                  size={13}
+                  color={colors.primaryForeground}
+                />
+                <Text style={styles.callButtonText}>Позвонить</Text>
+              </Pressable>
+            ) : null}
+            {status === "done" ? (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.archiveButton,
+                  pressed && { opacity: 0.8 },
+                ]}
+                onPress={() => confirmArchive(item)}
+                hitSlop={6}
+              >
+                <Text style={styles.archiveButtonText}>🗄 В архив</Text>
+              </Pressable>
+            ) : null}
+          </View>
         </View>
       </Pressable>
     );
@@ -775,9 +785,11 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    // Цветная полоска слева показывает статус заявки
+    // Цветные полоски по бокам показывают статус заявки (обе — одного цвета)
     borderLeftWidth: 4,
     borderLeftColor: "#f5a20b",
+    borderRightWidth: 4,
+    borderRightColor: "#f5a20b",
     padding: 12,
     gap: 5,
   },
@@ -832,6 +844,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     marginTop: 2,
+  },
+  // Обёртка номера: занимает свободное место, чтобы чип услуги остался справа
+  cardPhoneWrap: {
+    flex: 1,
   },
   cardPhone: {
     color: colors.primary,
@@ -954,21 +970,26 @@ const styles = StyleSheet.create({
   staleRowTextCritical: {
     color: "#f87171",
   },
-  staleCall: {
+  // Действия в нижней строке карточки: «Позвонить» и «В архив»
+  footerActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
-    borderRadius: 7,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    backgroundColor: colors.inputBg,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
+    gap: 6,
+    flexShrink: 0,
   },
-  staleCallText: {
-    color: colors.primary,
-    fontSize: 11,
-    fontWeight: "700",
+  callButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: colors.primary,
+  },
+  callButtonText: {
+    color: colors.primaryForeground,
+    fontSize: 12,
+    fontWeight: "800",
   },
   notesBlock: {
     gap: 2,
