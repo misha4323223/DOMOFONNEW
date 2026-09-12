@@ -3,8 +3,10 @@ import {
   Animated,
   Dimensions,
   Easing,
+  Platform,
   StyleSheet,
   Text,
+  Vibration,
   View,
 } from "react-native";
 import { colors } from "../theme";
@@ -17,16 +19,32 @@ import { colors } from "../theme";
  * экрана проявляется логотип приложения.
  * Короткая версия (обычные запуски): сразу логотип, без «прогулки» камеры.
  *
- * Сделано только на Animated + View (никаких новых нативных модулей),
- * поэтому уезжает обычным OTA-обновлением — новую сборку делать не нужно.
+ * Сделано только на Animated + View + Vibration (никаких новых нативных
+ * модулей), поэтому уезжает обычным OTA-обновлением — новую сборку делать
+ * не нужно.
  */
 
 const { width: W, height: H } = Dimensions.get("window");
 
-/** Длительность полной версии заставки. */
-const FULL_MS = 3200;
-/** Момент «входа в экран домофона» — с него начинается короткая версия. */
-const SHORT_START = 0.7;
+/**
+ * Базовая длительность сценария: панорама, наезд на экран домофона и
+ * появление логотипа. Именно под неё подобраны доли таймлайна ниже.
+ */
+const BASE_MS = 3600;
+/** Полная версия = базовый сценарий + пауза на логотипе (длиннее на 2 с). */
+const FULL_MS = BASE_MS + 2000;
+/**
+ * Сценарий играет с прежним темпом: доли считались от BASE_MS, поэтому при
+ * новой длине они сжимаются — и «лишние» секунды достаются паузе на логотипе,
+ * а панорама и наезд не замедляются.
+ */
+const s = (fraction: number) => (fraction * BASE_MS) / FULL_MS;
+/** Момент старта короткой версии — с него начинает проявляться логотип. */
+const SHORT_START = s(0.78);
+/** Длительность короткой версии: появление логотипа + мягкое затухание. */
+const SHORT_MS = 1700;
+/** Доля таймлайна, с которой начинаем уходить в приложение. */
+const ROOT_FADE = 0.839;
 /** Точка фокуса кадра = центр экрана домофона, поэтому наезд идёт ровно в неё. */
 const PANEL_SCREEN_W = W * 0.2;
 const PANEL_SCREEN_H = H * 0.26;
@@ -56,6 +74,11 @@ export function IntroSplash({ mode, onDone }: Props) {
   const grain = useRef(new Animated.Value(0)).current;
   // Полоса помех, ползущая по кадру
   const band = useRef(new Animated.Value(0)).current;
+  // «Ход руки» оператора: мелкая дрожь камеры и медленный увод кадра
+  const shake = useRef(new Animated.Value(0)).current;
+  const drift = useRef(new Animated.Value(0)).current;
+  // «Охота» автоэкспозиции — едва заметное мерцание яркости
+  const exposure = useRef(new Animated.Value(0)).current;
   // Время в углу кадра (тикает, пока показывается заставка)
   const [clock, setClock] = useState(() => new Date());
 
@@ -70,24 +93,38 @@ export function IntroSplash({ mode, onDone }: Props) {
 
   const anim = useMemo(
     () => ({
-      // 0.00–0.50 — камера водит по сторонам и возвращается в центр
-      camX: num([0, 0.3, 0.46, 0.5], [W * 0.16, -W * 0.16, -W * 0.03, 0]),
-      camRot: deg([0, 0.14, 0.3, 0.44, 0.5], [1, -1.2, 0.6, -0.2, 0]),
-      // 0.50–0.82 — наезд на экран домофона (ускорение, как у оптики)
-      zoom: num([0.5, 0.62, 0.72, 0.82], [1, 1.35, 3.2, 11]),
-      hud: num([0, 0.36, 0.46], [1, 1, 0]),
-      scan: num([0, 0.44, 0.64], [0.5, 0.5, 0]),
+      // камера водит по сторонам и возвращается в центр
+      camX: num([0, s(0.3), s(0.46), s(0.5)], [W * 0.16, -W * 0.16, -W * 0.03, 0]),
+      camRot: deg([0, s(0.14), s(0.3), s(0.44), s(0.5)], [1, -1.2, 0.6, -0.2, 0]),
+      // дальний план и дверь отстают от панели — так кадр читается объёмнее
+      bgX: num([0, s(0.3), s(0.46), s(0.5)], [W * 0.07, -W * 0.07, -W * 0.015, 0]),
+      doorX: num([0, s(0.3), s(0.46), s(0.5)], [W * 0.11, -W * 0.11, -W * 0.022, 0]),
+      // наезд на экран домофона (ускорение, как у оптики)
+      zoom: num([s(0.5), s(0.62), s(0.72), s(0.82)], [1, 1.35, 3.2, 11]),
+      hud: num([0, s(0.36), s(0.46)], [1, 1, 0]),
+      scan: num([0, s(0.44), s(0.64)], [0.5, 0.5, 0]),
+      // камера «включается»: короткая засветка и наводка на резкость
+      boot: num([0, s(0.015), s(0.06)], [0.3, 0.06, 0]),
+      focus: num([0, s(0.14), s(0.26)], [0.55, 0.16, 0]),
       // экран домофона «расплывается» на весь кадр
-      fill: num([0.55, 0.74], [0, 1]),
-      flash: num([0.72, 0.77, 0.84], [0, 0.35, 0]),
-      // логотип
-      logo: num([0.78, 0.88], [0, 1]),
-      logoScale: num([0.78, 0.94], [0.92, 1]),
-      root: num([0.93, 1], [1, 0]),
+      fill: num([s(0.55), s(0.74)], [0, 1]),
+      flash: num([s(0.72), s(0.77), s(0.84)], [0, 0.35, 0]),
+      // логотип проявляется и держится паузу — уже после наезда
+      logo: num([s(0.78), s(0.88)], [0, 1]),
+      logoScale: num([s(0.78), s(0.94)], [0.92, 1]),
+      root: num([ROOT_FADE, 1], [1, 0]),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [t, W, H],
   );
+
+  // Мелкая дрожь камеры и медленный увод — «рука оператора»
+  const shakeTX = shake.interpolate({ inputRange: [0, 0.5, 1], outputRange: [-1.8, 1.4, -0.6] });
+  const shakeTY = shake.interpolate({ inputRange: [0, 0.5, 1], outputRange: [1.2, -1.6, 0.8] });
+  const shakeR = shake.interpolate({ inputRange: [0, 1], outputRange: ["-0.22deg", "0.18deg"] });
+  const driftTX = drift.interpolate({ inputRange: [0, 1], outputRange: [-2.6, 2.6] });
+  const driftTY = drift.interpolate({ inputRange: [0, 1], outputRange: [1.4, -1.4] });
+  const exposureOpacity = exposure.interpolate({ inputRange: [0, 1], outputRange: [0, 0.035] });
 
   // Мигание REC + мелкий «шум» кадра + полоса помех
   useEffect(() => {
@@ -131,15 +168,96 @@ export function IntroSplash({ mode, onDone }: Props) {
         useNativeDriver: true,
       }),
     );
+    // «Оператор держит камеру» — короткие рывки разной длины с паузами
+    const loopShake = Animated.loop(
+      Animated.sequence([
+        Animated.timing(shake, {
+          toValue: 1,
+          duration: 260,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(shake, {
+          toValue: 0,
+          duration: 330,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(shake, {
+          toValue: 0.35,
+          duration: 300,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(shake, {
+          toValue: 0,
+          duration: 260,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    // Медленный увод кадра в сторону — как будто снимают с рук
+    const loopDrift = Animated.loop(
+      Animated.sequence([
+        Animated.timing(drift, {
+          toValue: 1,
+          duration: 5200,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+        Animated.timing(drift, {
+          toValue: 0,
+          duration: 5200,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    // Автоэкспозиция «догоняет» яркость подъезда
+    const loopExposure = Animated.loop(
+      Animated.sequence([
+        Animated.timing(exposure, {
+          toValue: 1,
+          duration: 700,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(exposure, {
+          toValue: 0,
+          duration: 1100,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(exposure, {
+          toValue: 0.6,
+          duration: 500,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(exposure, {
+          toValue: 0,
+          duration: 900,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
     loopBlink.start();
     loopGrain.start();
     loopBand.start();
+    loopShake.start();
+    loopDrift.start();
+    loopExposure.start();
     return () => {
       loopBlink.stop();
       loopGrain.stop();
       loopBand.stop();
+      loopShake.stop();
+      loopDrift.stop();
+      loopExposure.stop();
     };
-  }, [blink, grain, band]);
+  }, [blink, grain, band, shake, drift, exposure]);
 
   // Часы в углу кадра
   useEffect(() => {
@@ -151,7 +269,7 @@ export function IntroSplash({ mode, onDone }: Props) {
   const doneRef = useRef(onDone);
   doneRef.current = onDone;
   useEffect(() => {
-    const duration = full ? FULL_MS : Math.round(FULL_MS * (1 - SHORT_START));
+    const duration = full ? FULL_MS : SHORT_MS;
     const timeline = Animated.timing(t, {
       toValue: 1,
       duration,
@@ -163,6 +281,38 @@ export function IntroSplash({ mode, onDone }: Props) {
     });
     return () => timeline.stop();
   }, [full, t]);
+
+  // Тактильная дорожка: короткие деликатные толчки в ключевых точках сцены.
+  // Используется встроенный в React Native Vibration (в проекте нет
+  // expo-haptics — это нативный модуль, и через OTA он не приехал бы),
+  // так что вибрация доходит обычным JS-обновлением.
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const tap = (delay: number, pattern: number | number[]) => {
+      if (delay < 0) return;
+      timers.push(setTimeout(() => Vibration.vibrate(pattern), delay));
+    };
+
+    if (full) {
+      // камера «включилась»
+      tap(80, 14);
+      // оптика доехала до экрана домофона
+      tap(Math.round(s(0.72) * FULL_MS), 20);
+      // вспышка входа в экран — мягкий двойной толчок
+      tap(Math.round(s(0.77) * FULL_MS), [0, 12, 26, 34]);
+      // логотип: короткий «динг-донг» домофона
+      tap(Math.round(s(0.8) * FULL_MS), [0, 26, 80, 16]);
+      // перед уходом в приложение
+      tap(FULL_MS - 520, 16);
+    } else {
+      // короткая версия: тик на появлении логотипа и мягкое затухание
+      tap(120, 16);
+      tap(SHORT_MS - 420, [0, 18, 60, 14]);
+    }
+
+    return () => timers.forEach(clearTimeout);
+  }, [full]);
 
   const bandY = band.interpolate({ inputRange: [0, 1], outputRange: [-60, H + 60] });
   const timecode = clock.toLocaleTimeString("ru-RU", {
@@ -181,6 +331,24 @@ export function IntroSplash({ mode, onDone }: Props) {
             { transform: [{ translateX: anim.camX }, { rotate: anim.camRot }, { scale: anim.zoom }] },
           ]}
         >
+          {/* медленный увод кадра — рядом стоит оператор */}
+          <Animated.View
+            style={[
+              StyleSheet.absoluteFill,
+              { transform: [{ translateX: driftTX }, { translateY: driftTY }] },
+            ]}
+          >
+          {/* мелкая дрожь кадра */}
+          <Animated.View
+            style={[
+              StyleSheet.absoluteFill,
+              { transform: [{ translateX: shakeTX }, { translateY: shakeTY }, { rotate: shakeR }] },
+            ]}
+          >
+          {/* дальний план идёт медленнее панели — параллакс даёт объём */}
+          <Animated.View
+            style={[StyleSheet.absoluteFill, { transform: [{ translateX: anim.bgX }] }]}
+          >
           <View style={styles.wall} />
           <View style={styles.ceiling} />
           <View style={styles.lampGlow} />
@@ -192,8 +360,12 @@ export function IntroSplash({ mode, onDone }: Props) {
               style={[styles.floorLine, { top: H * line.top, opacity: line.opacity }]}
             />
           ))}
+          </Animated.View>
 
-          {/* входная дверь */}
+          {/* входная дверь — средний план */}
+          <Animated.View
+            style={[StyleSheet.absoluteFill, { transform: [{ translateX: anim.doorX }] }]}
+          >
           <View style={styles.doorFrame} />
           <View style={styles.door}>
             <View style={styles.doorPanelTop} />
@@ -201,6 +373,7 @@ export function IntroSplash({ mode, onDone }: Props) {
             <View style={styles.doorHandle} />
           </View>
           <View style={styles.peephole} />
+          </Animated.View>
 
           {/* панель домофона: её экран — ровно в центре кадра */}
           <View style={styles.panel}>
@@ -227,6 +400,8 @@ export function IntroSplash({ mode, onDone }: Props) {
             style={[styles.band, { transform: [{ translateY: bandY }] }]}
             pointerEvents="none"
           />
+          </Animated.View>
+          </Animated.View>
         </Animated.View>
       )}
 
@@ -280,6 +455,22 @@ export function IntroSplash({ mode, onDone }: Props) {
         <View style={styles.screenFill} />
         <View style={styles.screenGlow} />
       </Animated.View>
+
+      {/* «включение камеры»: короткая засветка и наводка на резкость */}
+      <Animated.View
+        style={[StyleSheet.absoluteFill, styles.white, { opacity: anim.boot }]}
+        pointerEvents="none"
+      />
+      <Animated.View
+        style={[StyleSheet.absoluteFill, styles.focus, { opacity: anim.focus }]}
+        pointerEvents="none"
+      />
+
+      {/* автоэкспозиция «дышит» — картинка перестаёт быть плоской */}
+      <Animated.View
+        style={[StyleSheet.absoluteFill, styles.white, { opacity: exposureOpacity }]}
+        pointerEvents="none"
+      />
 
       {/* вспышка на «входе» в экран */}
       <Animated.View
@@ -637,6 +828,12 @@ const styles = StyleSheet.create({
   },
   flash: {
     backgroundColor: colors.primary,
+  },
+  white: {
+    backgroundColor: "#ffffff",
+  },
+  focus: {
+    backgroundColor: "#07070a",
   },
 
   // — логотип —

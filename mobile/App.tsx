@@ -4,6 +4,7 @@ import { ActivityIndicator, Animated, AppState, StyleSheet, View } from "react-n
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
+import * as Updates from "expo-updates";
 import { checkForUpdate, downloadAndRestart } from "./src/updates";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { LeadsScreen } from "./src/screens/LeadsScreen";
@@ -24,9 +25,12 @@ import { IntroSplash } from "./src/components/IntroSplash";
 import { fetchChatUnread, markAllChatRead } from "./src/unread";
 
 const TOKEN_KEY = "admin_token";
-// Заставка: полную версию (камера осматривает площадку) показываем один раз
-// после установки/обновления, дальше — короткую (сразу логотип).
+// Заставка: полную версию (камера осматривает площадку) показываем при смене
+// бандла (новая сборка или OTA) и не чаще, чем раз в 6 часов — иначе при
+// каждом запуске пришлось бы ждать три секунды. В остальных запусках идёт
+// короткая версия: сразу логотип.
 const INTRO_KEY = "intro_seen";
+const INTRO_MIN_GAP_MS = 6 * 60 * 60 * 1000;
 
 // Показываем уведомления, когда приложение открыто
 Notifications.setNotificationHandler({
@@ -56,6 +60,8 @@ export default function App() {
   // Какая версия заставки показывается на этом запуске (null — ещё читаем)
   const [introMode, setIntroMode] = useState<"full" | "short" | null>(null);
   const [introDone, setIntroDone] = useState(false);
+  // Идентификатор текущего бандла: у нового OTA/сборки он другой
+  const introBundle = useRef("dev");
   const [screen, setScreen] = useState<Screen>({ name: "leads" });
   const [reloadKey, setReloadKey] = useState(0);
   // Счётчик непрочитанных сообщений чата (бейдж на табе «Чат»)
@@ -66,13 +72,27 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [saved, introSeen] = await Promise.all([
+        const [saved, introSeenRaw] = await Promise.all([
           AsyncStorage.getItem(TOKEN_KEY),
           AsyncStorage.getItem(INTRO_KEY),
         ]);
         setToken(saved);
-        setIntroMode(introSeen ? "short" : "full");
-        if (!introSeen) await AsyncStorage.setItem(INTRO_KEY, "1");
+
+        let introSeen: { id?: string; at?: number } | null = null;
+        try {
+          introSeen = introSeenRaw ? JSON.parse(introSeenRaw) : null;
+        } catch {
+          // Старый формат или мусор в хранилище — считаем, что не показывали
+          introSeen = null;
+        }
+
+        // В dev-режиме и Expo Go expo-updates выключен — ключ фиксированный.
+        const bundleId = Updates.isEnabled ? (Updates.updateId ?? "embedded") : "dev";
+        introBundle.current = bundleId;
+
+        const playedRecently =
+          introSeen?.id === bundleId && Date.now() - (introSeen.at ?? 0) < INTRO_MIN_GAP_MS;
+        setIntroMode(playedRecently ? "short" : "full");
       } finally {
         setLoading(false);
       }
@@ -155,8 +175,19 @@ export default function App() {
   };
 
   // Заставка отыграла — показываем приложение (стабильная ссылка: иначе
-  // анимация заставки перезапускалась бы на каждом рендере App)
-  const handleIntroDone = useCallback(() => setIntroDone(true), []);
+  // анимация заставки перезапускалась бы на каждом рендере App).
+  // Отметку о показе ставим ИМЕННО ЗДЕСЬ, а не при запуске: иначе авто-
+  // перезапуск на свежем OTA «съедал» бы полную версию целиком — приложение
+  // успевало записать флаг до перезагрузки и больше её не показывало.
+  const handleIntroDone = useCallback(() => {
+    setIntroDone(true);
+    AsyncStorage.setItem(
+      INTRO_KEY,
+      JSON.stringify({ id: introBundle.current, at: Date.now() }),
+    ).catch(() => {
+      // Не сохранилось — в следующий запуск просто покажем заставку снова
+    });
+  }, []);
 
   // Непрочитанные считает СЕРВЕР: у него хранится якорь прочтения, поэтому
   // счётчик одинаков на всех устройствах и не зависит от часов телефона.
