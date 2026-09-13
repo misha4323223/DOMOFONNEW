@@ -22,8 +22,10 @@ import {
   api,
   cacheLeads,
   cacheNotes,
+  cacheStock,
   getCachedLeads,
   getCachedNotes,
+  getCachedStock,
   isNetworkError,
   isServerError,
   type Lead,
@@ -32,6 +34,9 @@ import {
   type Note,
   type NoteInput,
   type NotePatch,
+  type StockItem,
+  type StockItemInput,
+  type StockItemPatch,
 } from "./api";
 import type { HomeContent } from "./content";
 
@@ -50,6 +55,10 @@ export type OfflineOp =
   | { id: string; kind: "note:create"; clientId: string; note: NoteInput; createdAt: number }
   | { id: string; kind: "note:update"; noteId: string; patch: NotePatch; createdAt: number }
   | { id: string; kind: "note:delete"; noteId: string; createdAt: number }
+  | { id: string; kind: "stock:create"; clientId: string; item: StockItemInput; createdAt: number }
+  | { id: string; kind: "stock:update"; itemId: string; patch: StockItemPatch; createdAt: number }
+  | { id: string; kind: "stock:adjust"; itemId: string; delta: number; createdAt: number }
+  | { id: string; kind: "stock:delete"; itemId: string; createdAt: number }
   | { id: string; kind: "chat:send"; clientId: string; text: string; sender: string; image?: string; createdAt: number };
 
 /** Операция без служебных полей — то, что кладут экраны в очередь. */
@@ -63,6 +72,10 @@ export type OfflineOpInput =
   | { kind: "note:create"; clientId: string; note: NoteInput }
   | { kind: "note:update"; noteId: string; patch: NotePatch }
   | { kind: "note:delete"; noteId: string }
+  | { kind: "stock:create"; clientId: string; item: StockItemInput }
+  | { kind: "stock:update"; itemId: string; patch: StockItemPatch }
+  | { kind: "stock:adjust"; itemId: string; delta: number }
+  | { kind: "stock:delete"; itemId: string }
   | { kind: "chat:send"; clientId: string; text: string; sender: string; image?: string };
 
 export interface SyncState {
@@ -243,6 +256,63 @@ export async function queueNoteDelete(noteId: string): Promise<void> {
   await enqueue({ kind: "note:delete", noteId });
 }
 
+// --- Расходники офлайн ---
+
+async function applyStockPatchToCache(itemId: string, patch: StockItemPatch): Promise<void> {
+  const items = await getCachedStock();
+  if (!items.some((i) => i.id === itemId)) return;
+  await cacheStock(items.map((i) => (i.id === itemId ? { ...i, ...patch } : i)));
+}
+
+async function applyStockAdjustToCache(itemId: string, delta: number): Promise<void> {
+  const items = await getCachedStock();
+  if (!items.some((i) => i.id === itemId)) return;
+  await cacheStock(
+    items.map((i) =>
+      i.id === itemId
+        ? { ...i, qty: Math.max(0, i.qty + delta), updatedAt: new Date().toISOString() }
+        : i,
+    ),
+  );
+}
+
+/** После отправки созданной офлайн позиции — заменить локальный id на настоящий. */
+async function replaceLocalStock(clientId: string, real: StockItem): Promise<void> {
+  const items = await getCachedStock();
+  await cacheStock(items.map((i) => (i.id === clientId ? { ...real } : i)));
+}
+
+/** Добавить позицию офлайн (local — позиция с локальным id для кеша). */
+export async function queueStockCreate(
+  clientId: string,
+  item: StockItemInput,
+  local: StockItem,
+): Promise<void> {
+  const items = await getCachedStock();
+  await cacheStock([...items, local]);
+  await enqueue({ kind: "stock:create", clientId, item });
+}
+
+/** Изменить позицию офлайн (правка применяется и в локальном кеше). */
+export async function queueStockUpdate(
+  itemId: string,
+  patch: StockItemPatch,
+): Promise<void> {
+  await applyStockPatchToCache(itemId, patch);
+  await enqueue({ kind: "stock:update", itemId, patch });
+}
+
+/** Списать/добавить остаток офлайн (дельтой, как на сервере). */
+export async function queueStockAdjust(itemId: string, delta: number): Promise<void> {
+  await applyStockAdjustToCache(itemId, delta);
+  await enqueue({ kind: "stock:adjust", itemId, delta });
+}
+
+/** Удалить позицию офлайн. */
+export async function queueStockDelete(itemId: string): Promise<void> {
+  await enqueue({ kind: "stock:delete", itemId });
+}
+
 /** Отправить сообщение в чат офлайн (применится при появлении связи). */
 export async function queueChatSend(
   clientId: string,
@@ -283,7 +353,7 @@ export async function getCachedContent(): Promise<HomeContent | null> {
 async function executeOp(
   op: OfflineOp,
   token: string,
-): Promise<{ created?: Lead; createdNote?: Note }> {
+): Promise<{ created?: Lead; createdNote?: Note; createdStock?: StockItem }> {
   switch (op.kind) {
     case "lead:update":
       await api.updateLead(token, op.leadId, op.patch);
@@ -313,6 +383,19 @@ async function executeOp(
       return {};
     case "note:delete":
       await api.deleteNote(token, op.noteId);
+      return {};
+    case "stock:create": {
+      const created = await api.createStockItem(token, op.item);
+      return { createdStock: created };
+    }
+    case "stock:update":
+      await api.updateStockItem(token, op.itemId, op.patch);
+      return {};
+    case "stock:adjust":
+      await api.adjustStockItem(token, op.itemId, op.delta);
+      return {};
+    case "stock:delete":
+      await api.deleteStockItem(token, op.itemId);
       return {};
     case "chat:send":
       await api.sendChatMessage(token, op.text, op.sender, op.image);
@@ -370,6 +453,20 @@ export async function flushPending(
             next.noteId === op.clientId
           ) {
             next.noteId = res.createdNote.id;
+          }
+        }
+      }
+      if (op.kind === "stock:create" && res.createdStock) {
+        await replaceLocalStock(op.clientId, res.createdStock);
+        for (let j = i + 1; j < ops.length; j++) {
+          const next = ops[j];
+          if (
+            (next.kind === "stock:update" ||
+              next.kind === "stock:adjust" ||
+              next.kind === "stock:delete") &&
+            next.itemId === op.clientId
+          ) {
+            next.itemId = res.createdStock.id;
           }
         }
       }

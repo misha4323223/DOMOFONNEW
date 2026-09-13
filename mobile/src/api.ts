@@ -238,6 +238,32 @@ export const api = {
   deleteNote: (token: string, id: string) =>
     request(`/api/notes/${id}`, { method: "DELETE", token }),
 
+  // --- Расходники в машине мастера ---
+
+  stock: (token: string) =>
+    request("/api/stock", { token }) as Promise<StockItem[]>,
+
+  createStockItem: (token: string, item: StockItemInput) =>
+    request("/api/stock", { method: "POST", body: item, token }) as Promise<StockItem>,
+
+  updateStockItem: (token: string, id: string, patch: StockItemPatch) =>
+    request(`/api/stock/${id}`, {
+      method: "PATCH",
+      body: patch,
+      token,
+    }) as Promise<StockItem>,
+
+  /** Списать (delta < 0) или добавить (delta > 0) к остатку. */
+  adjustStockItem: (token: string, id: string, delta: number) =>
+    request(`/api/stock/${id}/adjust`, {
+      method: "POST",
+      body: { delta },
+      token,
+    }) as Promise<StockItem>,
+
+  deleteStockItem: (token: string, id: string) =>
+    request(`/api/stock/${id}`, { method: "DELETE", token }),
+
   // --- Отзывы клиентов (модерация) ---
 
   /** Все отзывы (включая ожидающие модерации) — только для админа. */
@@ -352,6 +378,73 @@ export interface NoteInput {
 }
 
 export type NotePatch = Partial<NoteInput> & { done?: string };
+
+// --- Расходники в машине мастера ---
+
+export interface StockItem {
+  id: string;
+  /** Название позиции («Панель вызывная ELTIS»). */
+  name: string;
+  /** Единица измерения: «шт», «м», «пара». */
+  unit: string;
+  /** Сколько сейчас в машине. */
+  qty: number;
+  /** Остаток, ниже которого показываем «пора закупать» (0 — без порога). */
+  minQty: number;
+  /** Необязательная заметка. */
+  note: string;
+  updatedAt: string;
+}
+
+export interface StockItemInput {
+  name: string;
+  unit?: string;
+  qty?: number;
+  minQty?: number;
+  note?: string;
+}
+
+export type StockItemPatch = Partial<StockItemInput>;
+
+/** Пора закупать: остаток дошёл до минимума или ниже. */
+export function isLowStock(item: StockItem): boolean {
+  return item.minQty > 0 && item.qty <= item.minQty;
+}
+
+/** Закончилось совсем — показываем красным. */
+export function isOutOfStock(item: StockItem): boolean {
+  return item.qty <= 0;
+}
+
+/** Число остатка без лишних нулей и с запятой: 3 → «3», 1.5 → «1,5». */
+export function formatQty(value: number): string {
+  const rounded = Math.round(value * 1000) / 1000;
+  return Number.isInteger(rounded)
+    ? String(rounded)
+    : String(rounded).replace(".", ",");
+}
+
+const STOCK_CACHE_KEY = "stock_cache";
+
+/** Сохранить расходники в локальный кеш (нужен для работы без сети). */
+export async function cacheStock(items: StockItem[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(STOCK_CACHE_KEY, JSON.stringify(items));
+  } catch {
+    // кеш не критичен — молча пропускаем
+  }
+}
+
+/** Прочитать расходники из локального кеша (или []) */
+export async function getCachedStock(): Promise<StockItem[]> {
+  try {
+    const raw = await AsyncStorage.getItem(STOCK_CACHE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as StockItem[];
+  } catch {
+    return [];
+  }
+}
 
 const NOTES_CACHE_KEY = "notes_cache";
 

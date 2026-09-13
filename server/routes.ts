@@ -5,7 +5,11 @@ import { storage } from "./storage";
 import { insertLeadSchema, type Lead } from "@shared/schema";
 import { SERVICE_LABELS } from "@shared/services";
 import { notifyNewLead, notifyNewReview, notifyChatMessage } from "./push";
-import { saveDeviceToken, removeDeviceToken } from "./ydb";
+import {
+  saveDeviceToken,
+  removeDeviceToken,
+  type StockItemPatch,
+} from "./ydb";
 import { recognizeHandwritten } from "./vision";
 import { parseCandidates, parseDictation } from "./parse";
 import {
@@ -503,6 +507,122 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.delete("/api/notes/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
     const deleted = await storage.deleteNote(req.params.id);
     return deleted ? res.status(204).send() : res.status(404).json({ message: "Заметка не найдена" });
+  }));
+
+  // --- Расходники в машине мастера (только мобильное приложение) ---
+  // Мастер ведёт остаток того, что лежит в машине. Списание и пополнение
+  // идут дельтой (adjust), а не перезаписью числа — так правки с двух
+  // телефонов не затирают друг друга.
+  const STOCK_NAME_MAX = 60;
+  const STOCK_UNIT_MAX = 12;
+  const STOCK_NOTE_MAX = 200;
+  const STOCK_MAX_QTY = 100_000;
+
+  /** Количество из тела запроса: число или «1,5» строкой. Некорректное → undefined. */
+  function stockQty(value: unknown): number | undefined {
+    if (typeof value !== "number" && typeof value !== "string") return undefined;
+    const n = Number(String(value).trim().replace(",", "."));
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return Math.min(Math.round(n * 1000) / 1000, STOCK_MAX_QTY);
+  }
+
+  app.get("/api/stock", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
+    const items = await storage.listStockItems();
+    return res.json(items);
+  }));
+
+  app.post("/api/stock", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    if (!name) {
+      return res.status(400).json({ message: "Введите название позиции" });
+    }
+    if (name.length > STOCK_NAME_MAX) {
+      return res.status(400).json({ message: "Название слишком длинное" });
+    }
+    const item = await storage.createStockItem({
+      name,
+      unit:
+        typeof req.body?.unit === "string"
+          ? req.body.unit.trim().slice(0, STOCK_UNIT_MAX)
+          : undefined,
+      qty: stockQty(req.body?.qty),
+      minQty: stockQty(req.body?.minQty),
+      note:
+        typeof req.body?.note === "string"
+          ? req.body.note.trim().slice(0, STOCK_NOTE_MAX)
+          : undefined,
+    });
+    return res.status(201).json(item);
+  }));
+
+  app.patch("/api/stock/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const patch: StockItemPatch = {};
+    if (req.body?.name !== undefined) {
+      const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+      if (!name) {
+        return res.status(400).json({ message: "Введите название позиции" });
+      }
+      if (name.length > STOCK_NAME_MAX) {
+        return res.status(400).json({ message: "Название слишком длинное" });
+      }
+      patch.name = name;
+    }
+    if (req.body?.unit !== undefined) {
+      patch.unit =
+        typeof req.body.unit === "string"
+          ? req.body.unit.trim().slice(0, STOCK_UNIT_MAX)
+          : "";
+    }
+    if (req.body?.qty !== undefined) {
+      const qty = stockQty(req.body.qty);
+      if (qty === undefined) {
+        return res.status(400).json({ message: "Некорректный остаток" });
+      }
+      patch.qty = qty;
+    }
+    if (req.body?.minQty !== undefined) {
+      const minQty = stockQty(req.body.minQty);
+      if (minQty === undefined) {
+        return res.status(400).json({ message: "Некорректный минимум" });
+      }
+      patch.minQty = minQty;
+    }
+    if (req.body?.note !== undefined) {
+      patch.note =
+        typeof req.body.note === "string"
+          ? req.body.note.trim().slice(0, STOCK_NOTE_MAX)
+          : "";
+    }
+    const item = await storage.updateStockItem(req.params.id, patch);
+    return item
+      ? res.json(item)
+      : res.status(404).json({ message: "Позиция не найдена" });
+  }));
+
+  // Списать (delta < 0) или добавить (delta > 0) к остатку.
+  app.post(
+    "/api/stock/:id/adjust",
+    requireAdmin,
+    asyncHandler(async (req: Request, res: Response) => {
+      const delta = Number(req.body?.delta);
+      if (!Number.isFinite(delta) || delta === 0) {
+        return res.status(400).json({ message: "Укажите количество" });
+      }
+      if (Math.abs(delta) > STOCK_MAX_QTY) {
+        return res.status(400).json({ message: "Слишком большое количество" });
+      }
+      const item = await storage.adjustStockItem(req.params.id, delta);
+      return item
+        ? res.json(item)
+        : res.status(404).json({ message: "Позиция не найдена" });
+    }),
+  );
+
+  app.delete("/api/stock/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const deleted = await storage.deleteStockItem(req.params.id);
+    return deleted
+      ? res.status(204).send()
+      : res.status(404).json({ message: "Позиция не найдена" });
   }));
 
   // --- Чат между админами (только мобильное приложение) ---

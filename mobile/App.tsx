@@ -13,6 +13,7 @@ import { ScanScreen } from "./src/screens/ScanScreen";
 import { ReviewScreen } from "./src/screens/ReviewScreen";
 import { ContentScreen } from "./src/screens/ContentScreen";
 import { NotesScreen } from "./src/screens/NotesScreen";
+import { StockScreen } from "./src/screens/StockScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ReviewsScreen } from "./src/screens/ReviewsScreen";
 import { ArchiveScreen } from "./src/screens/ArchiveScreen";
@@ -49,6 +50,7 @@ type Screen =
   | { name: "review"; candidates: LeadCandidate[]; fullText: string }
   | { name: "content" }
   | { name: "notes" }
+  | { name: "stock" }
   | { name: "chat" }
   | { name: "reviews" }
   | { name: "archive" }
@@ -257,6 +259,7 @@ export default function App() {
     screen.name === "chat" ||
     screen.name === "archive" ||
     screen.name === "notes" ||
+    screen.name === "stock" ||
     screen.name === "reviews" ||
     screen.name === "content" ||
     screen.name === "about";
@@ -291,6 +294,9 @@ export default function App() {
         break;
       case "notes":
         setScreen({ name: "notes" });
+        break;
+      case "stock":
+        setScreen({ name: "stock" });
         break;
       case "reviews":
         setScreen({ name: "reviews" });
@@ -370,6 +376,13 @@ export default function App() {
       <View style={styles.root}>
         <StatusBar style="light" />
         <NotesScreen token={token} onBack={() => setScreen({ name: "leads" })} />
+      </View>
+    );
+  } else if (screen.name === "stock") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <StockScreen token={token} onBack={() => setScreen({ name: "leads" })} />
       </View>
     );
   } else if (screen.name === "chat") {

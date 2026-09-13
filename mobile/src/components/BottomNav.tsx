@@ -17,6 +17,7 @@ export type NavTarget =
   | "chat"
   | "archive"
   | "notes"
+  | "stock"
   | "reviews"
   | "content"
   | "scan"
@@ -54,6 +55,7 @@ const MORE_ITEMS: {
 }[] = [
   { target: "scan", iconName: "camera-outline", label: "Блокнот" },
   { target: "notes", iconName: "document-text-outline", label: "Заметки" },
+  { target: "stock", iconName: "cube-outline", label: "Расходники" },
   { target: "reviews", iconName: "star-outline", label: "Отзывы" },
   { target: "content", iconName: "globe-outline", label: "Сайт" },
   { target: "about", iconName: "information-circle-outline", label: "О приложении" },

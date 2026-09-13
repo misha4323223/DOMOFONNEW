@@ -33,6 +33,7 @@ const T = {
   notes: "yql_notes",
   chat: "yql_chat_messages",
   reviews: "yql_reviews",
+  stock: "yql_stock",
 } as const;
 
 /** Получить IAM-токен сервис-аккаунта: из окружения (локально) или метаданных (в контейнере). */
@@ -272,6 +273,20 @@ async function ensureTables(): Promise<void> {
           text Utf8 NOT NULL,
           status Utf8 NOT NULL,
           createdAt Utf8 NOT NULL,
+          PRIMARY KEY (id)
+        )
+      `);
+      // Расходники в машине мастера: остаток считаем числом, но храним
+      // строкой — как все остальные таблицы, чтобы не спорить с типами YDB.
+      await createIfMissing("stock", T.stock, () => sql`
+        CREATE TABLE IF NOT EXISTS ${sql.identifier(T.stock)} (
+          id Utf8 NOT NULL,
+          name Utf8 NOT NULL,
+          unit Utf8 NOT NULL,
+          qty Utf8 NOT NULL,
+          minQty Utf8 NOT NULL,
+          note Utf8 NOT NULL,
+          updatedAt Utf8 NOT NULL,
           PRIMARY KEY (id)
         )
       `);
@@ -1110,5 +1125,167 @@ export async function deleteYdbReview(id: string): Promise<boolean> {
   await dropReviewReply(id).catch((err) =>
     console.error("[ydb] Не удалось удалить ответ на отзыв:", err),
   );
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Расходники в машине мастера (таблица yql_stock)
+//
+// Мастер ведёт остаток того, что лежит в машине: вызывные панели, трубки,
+// замки, кабель. Когда остаток падает до «минимума» — приложение
+// предупреждает, что пора закупать. Списание/пополнение идёт дельтой
+// (adjust), а не перезаписью числа: так два телефона не затирают
+// правки друг друга.
+// ---------------------------------------------------------------------------
+
+export interface StockItem {
+  id: string;
+  /** Название позиции («Панель вызывная ELTIS»). */
+  name: string;
+  /** Единица измерения: «шт», «м», «пара» — свободный текст. */
+  unit: string;
+  /** Сколько сейчас в машине. */
+  qty: number;
+  /** Остаток, ниже которого показываем «пора закупать». */
+  minQty: number;
+  /** Необязательная заметка («для панелей ELTIS-200»). */
+  note: string;
+  updatedAt: string;
+}
+
+export interface StockItemInput {
+  name: string;
+  unit?: string;
+  qty?: number;
+  minQty?: number;
+  note?: string;
+}
+
+export type StockItemPatch = Partial<StockItemInput>;
+
+/** Привести количество к аккуратному числу: не меньше нуля, без мусора в дробях. */
+function normQty(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.round(n * 1000) / 1000;
+}
+
+/** Строковое поле строки YDB → число (для qty/minQty). */
+function numFrom(row: Row, key: string): number {
+  const n = Number(str(row, key));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function rowToStockItem(row: Row): StockItem {
+  return {
+    id: str(row, "id"),
+    name: str(row, "name"),
+    unit: str(row, "unit") || "шт",
+    qty: numFrom(row, "qty"),
+    minQty: numFrom(row, "minQty"),
+    note: str(row, "note"),
+    updatedAt: str(row, "updatedAt"),
+  };
+}
+
+async function upsertYdbStockItem(item: StockItem): Promise<void> {
+  const sql = await getSql();
+  await sql`
+    UPSERT INTO ${sql.identifier(T.stock)} (id, name, unit, qty, minQty, note, updatedAt)
+    VALUES (${item.id}, ${item.name}, ${item.unit}, ${String(item.qty)}, ${String(item.minQty)}, ${item.note}, ${item.updatedAt})
+  `;
+}
+
+export async function createYdbStockItem(input: StockItemInput): Promise<StockItem> {
+  await ensureTables();
+  const item: StockItem = {
+    id: randomUUID(),
+    name: input.name.trim(),
+    unit: (input.unit ?? "шт").trim() || "шт",
+    qty: normQty(input.qty ?? 0),
+    minQty: normQty(input.minQty ?? 0),
+    note: (input.note ?? "").trim(),
+    updatedAt: new Date().toISOString(),
+  };
+  await upsertYdbStockItem(item);
+  return item;
+}
+
+/**
+ * Все позиции. Сначала «проблемные» (остаток дошёл до минимума или ниже),
+ * внутри групп — по алфавиту: список всегда в одном и том же порядке.
+ */
+export async function listYdbStockItems(): Promise<StockItem[]> {
+  await ensureTables();
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, name, unit, qty, minQty, note, updatedAt FROM ${sql.identifier(T.stock)}
+  `;
+  const items = ((result[0] ?? []) as Row[]).map(rowToStockItem);
+  return items.sort((a, b) => {
+    const aLow = a.minQty > 0 && a.qty <= a.minQty;
+    const bLow = b.minQty > 0 && b.qty <= b.minQty;
+    if (aLow !== bLow) return aLow ? -1 : 1;
+    return a.name.localeCompare(b.name, "ru");
+  });
+}
+
+async function readStockRow(id: string): Promise<StockItem | undefined> {
+  const sql = await getSql();
+  const result = await sql`
+    SELECT id, name, unit, qty, minQty, note, updatedAt FROM ${sql.identifier(T.stock)} WHERE id = ${id}
+  `;
+  const row = (result[0] ?? [])[0] as Row | undefined;
+  return row ? rowToStockItem(row) : undefined;
+}
+
+export async function updateYdbStockItem(
+  id: string,
+  patch: StockItemPatch,
+): Promise<StockItem | undefined> {
+  await ensureTables();
+  const current = await readStockRow(id);
+  if (!current) return undefined;
+  const updated: StockItem = {
+    ...current,
+    name: patch.name !== undefined ? patch.name.trim() : current.name,
+    unit:
+      patch.unit !== undefined
+        ? patch.unit.trim() || current.unit
+        : current.unit,
+    qty: patch.qty !== undefined ? normQty(patch.qty) : current.qty,
+    minQty: patch.minQty !== undefined ? normQty(patch.minQty) : current.minQty,
+    note: patch.note !== undefined ? patch.note.trim() : current.note,
+    updatedAt: new Date().toISOString(),
+  };
+  await upsertYdbStockItem(updated);
+  return updated;
+}
+
+/**
+ * Списать (delta < 0) или добавить (delta > 0) количество к остатку.
+ * Ниже нуля остаток не уходит: «списал больше, чем было» — это 0, а не долг.
+ */
+export async function adjustYdbStockItem(
+  id: string,
+  delta: number,
+): Promise<StockItem | undefined> {
+  await ensureTables();
+  const current = await readStockRow(id);
+  if (!current) return undefined;
+  const next = normQty(current.qty + delta);
+  const updated: StockItem = {
+    ...current,
+    qty: next,
+    updatedAt: new Date().toISOString(),
+  };
+  await upsertYdbStockItem(updated);
+  return updated;
+}
+
+export async function deleteYdbStockItem(id: string): Promise<boolean> {
+  await ensureTables();
+  const sql = await getSql();
+  await sql`DELETE FROM ${sql.identifier(T.stock)} WHERE id = ${id}`;
   return true;
 }

@@ -24,6 +24,11 @@ import {
   listYdbPublishedReviews,
   updateYdbReview,
   deleteYdbReview,
+  createYdbStockItem,
+  listYdbStockItems,
+  updateYdbStockItem,
+  adjustYdbStockItem,
+  deleteYdbStockItem,
   type StoredSetting,
   type Note,
   type NoteInput,
@@ -34,6 +39,9 @@ import {
   type Review,
   type ReviewInput,
   type ReviewStatus,
+  type StockItem,
+  type StockItemInput,
+  type StockItemPatch,
 } from "./ydb";
 
 /** Ключ настройки: createdAt последнего прочитанного сообщения чата. */
@@ -75,6 +83,13 @@ export interface IStorage {
     patch: { status?: ReviewStatus; reply?: string },
   ): Promise<Review | undefined>;
   deleteReview(id: string): Promise<boolean>;
+  // Расходники в машине мастера (только мобильное приложение).
+  createStockItem(input: StockItemInput): Promise<StockItem>;
+  listStockItems(): Promise<StockItem[]>;
+  updateStockItem(id: string, patch: StockItemPatch): Promise<StockItem | undefined>;
+  /** Списать (delta < 0) или добавить (delta > 0) остаток позиции. */
+  adjustStockItem(id: string, delta: number): Promise<StockItem | undefined>;
+  deleteStockItem(id: string): Promise<boolean>;
 }
 
 export class MemStorage implements IStorage {
@@ -84,6 +99,7 @@ export class MemStorage implements IStorage {
   private notes = new Map<string, Note>();
   private chat = new Map<string, ChatMessage>();
   private reviews = new Map<string, Review>();
+  private stock = new Map<string, StockItem>();
   private useYdb = Boolean(process.env.YDB_DATABASE_PATH);
 
   async getUser(id: string): Promise<User | undefined> {
@@ -320,6 +336,73 @@ export class MemStorage implements IStorage {
   async deleteReview(id: string): Promise<boolean> {
     if (this.useYdb) return deleteYdbReview(id);
     return this.reviews.delete(id);
+  }
+
+  async createStockItem(input: StockItemInput): Promise<StockItem> {
+    if (this.useYdb) return createYdbStockItem(input);
+    const item: StockItem = {
+      id: randomUUID(),
+      name: input.name.trim(),
+      unit: (input.unit ?? "шт").trim() || "шт",
+      qty: Math.max(0, input.qty ?? 0),
+      minQty: Math.max(0, input.minQty ?? 0),
+      note: (input.note ?? "").trim(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.stock.set(item.id, item);
+    return item;
+  }
+
+  async listStockItems(): Promise<StockItem[]> {
+    if (this.useYdb) return listYdbStockItems();
+    return Array.from(this.stock.values()).sort((a, b) => {
+      const aLow = a.minQty > 0 && a.qty <= a.minQty;
+      const bLow = b.minQty > 0 && b.qty <= b.minQty;
+      if (aLow !== bLow) return aLow ? -1 : 1;
+      return a.name.localeCompare(b.name, "ru");
+    });
+  }
+
+  async updateStockItem(
+    id: string,
+    patch: StockItemPatch,
+  ): Promise<StockItem | undefined> {
+    if (this.useYdb) return updateYdbStockItem(id, patch);
+    const current = this.stock.get(id);
+    if (!current) return undefined;
+    const updated: StockItem = {
+      ...current,
+      ...patch,
+      name: patch.name !== undefined ? patch.name.trim() : current.name,
+      note: patch.note !== undefined ? patch.note.trim() : current.note,
+      qty: patch.qty !== undefined ? Math.max(0, patch.qty) : current.qty,
+      minQty:
+        patch.minQty !== undefined ? Math.max(0, patch.minQty) : current.minQty,
+      updatedAt: new Date().toISOString(),
+    };
+    this.stock.set(id, updated);
+    return updated;
+  }
+
+  async adjustStockItem(
+    id: string,
+    delta: number,
+  ): Promise<StockItem | undefined> {
+    if (this.useYdb) return adjustYdbStockItem(id, delta);
+    const current = this.stock.get(id);
+    if (!current) return undefined;
+    const updated: StockItem = {
+      ...current,
+      qty: Math.max(0, current.qty + delta),
+      updatedAt: new Date().toISOString(),
+    };
+    this.stock.set(id, updated);
+    return updated;
+  }
+
+  async deleteStockItem(id: string): Promise<boolean> {
+    if (this.useYdb) return deleteYdbStockItem(id);
+    return this.stock.delete(id);
   }
 }
 
