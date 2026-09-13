@@ -15,13 +15,31 @@
  * Блок скрыт от посетителей (sr-only), но текст в нём 1-в-1 повторяет
  * видимый контент — это стандартный приём пререндера, а не «скрытый
  * текст»: пользователь видит то же самое, что читает робот.
+ *
+ * Отзывы — отдельная история. Клиент грузит их запросом /api/reviews уже
+ * после загрузки страницы, поэтому в HTML их не было вовсе. Здесь отзывы
+ * (опубликованные в админке) превращаются в:
+ *   1) текст в пререндер-блоке — чтобы попадали в индекс без JS,
+ *   2) разметку schema.org Review + AggregateRating — по ней Яндекс может
+ *      показать рейтинг в сниппете (Google звёзды для отзывов компании
+ *      о самой себе не показывает, это его правило, а не наша ошибка).
  */
 import { sanitizeContent, type HomeContent } from "@shared/content";
 import { storage } from "./storage";
+import type { Review } from "./ydb";
 
 const CONTENT_SETTING_KEY = "content:home";
 /** Контент меняется редко (правки из админки) — кэшируем на 5 минут. */
 const CONTENT_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Сколько отзывов показываем в тексте пререндера. Столько же, сколько
+ * выводит сайт (`published.slice(0, 6)`), — разметка должна совпадать
+ * с тем, что видит посетитель.
+ */
+const SEO_REVIEWS_LIMIT = 6;
+/** Отзывы публикуются в админке — кэш короткий, как и у /api/reviews. */
+const REVIEWS_TTL_MS = 60 * 1000;
 
 /** Экранирование текста для безопасной вставки в HTML-атрибуты и тело. */
 function esc(s: string): string {
@@ -33,6 +51,7 @@ function esc(s: string): string {
 }
 
 let contentCache: { content: HomeContent; at: number } | null = null;
+let reviewsCache: { reviews: Review[]; at: number } | null = null;
 
 /**
  * Читает контент сайта из БД (правки админки) с запасным вариантом —
@@ -58,6 +77,49 @@ async function loadContent(): Promise<HomeContent> {
   const content = sanitizeContent(overrides);
   contentCache = { content, at: Date.now() };
   return content;
+}
+
+/**
+ * Читает опубликованные отзывы для пререндера. Падение БД не должно ронять
+ * страницу: при ошибке считаем, что отзывов нет, и отдаём HTML без них.
+ */
+async function loadPublishedReviews(): Promise<Review[]> {
+  if (reviewsCache && Date.now() - reviewsCache.at < REVIEWS_TTL_MS) {
+    return reviewsCache.reviews;
+  }
+  let reviews: Review[] = [];
+  try {
+    reviews = await storage.listPublishedReviews();
+  } catch (err) {
+    console.error("Не удалось прочитать отзывы для SEO-пререндера:", err);
+  }
+  reviewsCache = { reviews, at: Date.now() };
+  return reviews;
+}
+
+/**
+ * Склонение слова «отзыв» в родительном падеже — для фразы «на основе N …»
+ * («на основе 1 отзыва», «на основе 5 отзывов»). То же правило на клиенте.
+ */
+function pluralReviews(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "отзыва";
+  return "отзывов";
+}
+
+/** Средняя оценка опубликованных отзывов (0 — отзывов нет). */
+function averageRating(reviews: Review[]): number {
+  if (reviews.length === 0) return 0;
+  const sum = reviews.reduce((acc, r) => acc + (Number(r.rating) || 0), 0);
+  return sum / reviews.length;
+}
+
+/** Дата отзыва в формате schema.org (YYYY-MM-DD). */
+function reviewDate(createdAt: string): string {
+  const parsed = new Date(createdAt);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toISOString().slice(0, 10);
 }
 
 /**
@@ -131,13 +193,95 @@ function buildSeoBlock(content: HomeContent): string {
 }
 
 /**
+ * Отзывы в пререндер-блоке: заголовок блока, сводная оценка и сами отзывы
+ * с ответами службы. Отзывов нет — раздела нет (пустой заголовок в индексе
+ * хуже, чем его отсутствие).
+ */
+function buildReviewsBlock(content: HomeContent, reviews: Review[]): string {
+  if (reviews.length === 0) return "";
+
+  const average = averageRating(reviews);
+  const parts: string[] = [];
+  parts.push(`<h2>${esc(content.reviews.title)}</h2>`);
+  // Запятая как разделитель дробей — так же, как показывает сайт.
+  const averageText = average.toFixed(1).replace(".", ",");
+  parts.push(
+    `<p>Средняя оценка ${averageText} из 5 на основе ${reviews.length} ${pluralReviews(reviews.length)}.</p>`,
+  );
+  parts.push("<ul>");
+  for (const review of reviews.slice(0, SEO_REVIEWS_LIMIT)) {
+    const rating = Number(review.rating) || 0;
+    parts.push("<li>");
+    parts.push(`<p>Оценка ${rating} из 5</p>`);
+    parts.push(`<p>${esc(review.text)}</p>`);
+    const author = review.city ? `${review.name}, ${review.city}` : review.name;
+    parts.push(`<p>${esc(author)}</p>`);
+    if (review.reply?.trim()) {
+      parts.push(`<p>Ответ службы: ${esc(review.reply)}</p>`);
+    }
+    parts.push("</li>");
+  }
+  parts.push("</ul>");
+  return parts.join("\n");
+}
+
+/**
+ * Разметка schema.org для отзывов: AggregateRating и Review внутри того же
+ * узла LocalBusiness (ссылка по @id на блок из index.html).
+ *
+ * Отдельный <script> — потому что сводная оценка должна считаться из БД
+ * на сервере, а статический блок в index.html править нельзя: его же
+ * отдаёт Vite в режиме разработки.
+ */
+function buildReviewsJsonLd(reviews: Review[]): string {
+  if (reviews.length === 0) return "";
+
+  const average = averageRating(reviews);
+  const data = {
+    "@context": "https://schema.org",
+    "@type": "LocalBusiness",
+    "@id": "https://obzor71.ru/#business",
+    name: "Домофонная служба ИП Бухтеев",
+    url: "https://obzor71.ru/",
+    aggregateRating: {
+      "@type": "AggregateRating",
+      ratingValue: average.toFixed(1),
+      reviewCount: reviews.length,
+      bestRating: 5,
+      worstRating: 1,
+    },
+    review: reviews.slice(0, SEO_REVIEWS_LIMIT).map((review) => ({
+      "@type": "Review",
+      author: { "@type": "Person", name: review.name },
+      datePublished: reviewDate(review.createdAt),
+      reviewBody: review.text,
+      reviewRating: {
+        "@type": "Rating",
+        ratingValue: Number(review.rating) || 0,
+        bestRating: 5,
+        worstRating: 1,
+      },
+    })),
+  };
+
+  // Экранируем «<», иначе текст отзыва со «</script>» сломает страницу.
+  const json = JSON.stringify(data).replace(/</g, "\\u003c");
+  return `<script type="application/ld+json">${json}</script>`;
+}
+
+/**
  * Вставляет SEO-контент в HTML-оболочку SPA:
  * 1. заменяет <title> и мета-описания на актуальные из админки,
- * 2. добавляет скрытый блок с текстом сайта перед </body>,
- * 3. добавляет YandexRotorSettings — подсказку Яндексу дождаться
- *    клиентского рендера (для динамики вроде отзывов).
+ * 2. добавляет скрытый блок с текстом сайта и отзывами перед </body>,
+ * 3. добавляет разметку schema.org с рейтингом и отзывами,
+ * 4. добавляет YandexRotorSettings — подсказку Яндексу дождаться
+ *    клиентского рендера (для остальной динамики на странице).
  */
-export function injectSeo(html: string, content: HomeContent): string {
+export function injectSeo(
+  html: string,
+  content: HomeContent,
+  reviews: Review[] = [],
+): string {
   const { seo } = content;
   let out = html;
 
@@ -161,13 +305,15 @@ export function injectSeo(html: string, content: HomeContent): string {
     );
   }
 
-  const block = buildSeoBlock(content);
+  const block = buildSeoBlock(content) + buildReviewsBlock(content, reviews);
+  const ratingJsonLd = buildReviewsJsonLd(reviews);
   const injection = `
-<!-- SEO-пререндер: текст сайта для поисковых роботов (скрыт от посетителей,
-     дублирует видимый контент) -->
+<!-- SEO-пререндер: текст сайта и отзывы для поисковых роботов (скрыт от
+     посетителей, дублирует видимый контент) -->
 <div style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap" aria-hidden="true">
 ${block}
 </div>
+${ratingJsonLd}
 <script>
 /* Подсказка Яндексу: контент на странице считается загруженным после
    клиентского рендера (отзывы и прочая динамика). */
@@ -194,6 +340,9 @@ window.YandexRotorSettings = { WaiterEnabled: true };
 
 /** Точка входа для сервера: готовый HTML главной страницы с SEO-пререндером. */
 export async function renderIndexHtml(rawHtml: string): Promise<string> {
-  const content = await loadContent();
-  return injectSeo(rawHtml, content);
+  const [content, reviews] = await Promise.all([
+    loadContent(),
+    loadPublishedReviews(),
+  ]);
+  return injectSeo(rawHtml, content, reviews);
 }
