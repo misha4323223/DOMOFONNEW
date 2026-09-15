@@ -5,7 +5,15 @@ import { query, type QueryClient } from "@ydbjs/query";
 import { Optional } from "@ydbjs/value/optional";
 import { Text, TextType } from "@ydbjs/value/primitive";
 import { scanDocApiTable, type DocApiItem } from "./docapi";
-import type { InsertLead, Lead, LeadStatus, LeadSource } from "@shared/schema";
+import {
+  normalizeLeadParts,
+  parseLeadParts,
+  serializeLeadParts,
+  type InsertLead,
+  type Lead,
+  type LeadStatus,
+  type LeadSource,
+} from "@shared/schema";
 
 // ---------------------------------------------------------------------------
 // Подключение к YDB по YQL (обычные реляционные таблицы).
@@ -264,6 +272,10 @@ async function ensureTables(): Promise<void> {
       };
       await ensureColumn(T.chat, "image");
       await ensureColumn(T.notes, "leadId");
+      // Расходники, израсходованные на заявке: список позиций (JSON) и отметка
+      // «уже списано», чтобы одно и то же не списывалось дважды.
+      await ensureColumn(T.leads, "parts");
+      await ensureColumn(T.leads, "partsDone");
       await createIfMissing("reviews", T.reviews, () => sql`
         CREATE TABLE IF NOT EXISTS ${sql.identifier(T.reviews)} (
           id Utf8 NOT NULL,
@@ -339,6 +351,9 @@ function docApiItemToLead(item: DocApiItem): Lead {
     status: status === "urgent" || status === "done" ? status : "new",
     source: item.source?.S === "admin" ? "admin" : "site",
     archived: item.archived?.S === "1" ? "1" : "0",
+    // В старых документных таблицах расходников у заявки не было
+    parts: [],
+    partsDone: "0",
     createdAt: item.createdAt?.S ?? "",
   };
 }
@@ -455,13 +470,78 @@ function rowToLead(row: Row): Lead {
     source,
     // Записи без атрибута считаем активными
     archived: row.archived === "1" ? "1" : "0",
+    // Расходники заявки и отметка «уже списано» (колонки могли ещё не появиться
+    // в старой таблице — тогда считаем, что расходников нет).
+    parts: parseLeadParts(row.parts),
+    partsDone: row.partsDone === "1" ? "1" : "0",
     createdAt: str(row, "createdAt"),
   };
 }
 
+/**
+ * Сохранить заявку. Если колонок parts/partsDone в таблице ещё нет (миграция
+ * не прошла) — сохраняем без них: список заявок продолжает работать,
+ * просто без расхода расходников.
+ */
+async function upsertLeadRow(lead: Lead): Promise<void> {
+  const sql = await getSql();
+  try {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.leads)}
+        (id, name, phone, service, address, comment, status, source, archived, createdAt, parts, partsDone)
+      VALUES
+        (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
+         ${optStr(lead.comment)}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt},
+         ${serializeLeadParts(lead.parts)}, ${lead.partsDone})
+    `;
+  } catch {
+    await sql`
+      UPSERT INTO ${sql.identifier(T.leads)}
+        (id, name, phone, service, address, comment, status, source, archived, createdAt)      VALUES
+          (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
+           ${optStr(lead.comment)}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
+      `;
+  }
+}
+
+/** Все заявки (с расходниками, если колонки есть). */
+async function selectLeadRows(): Promise<Row[]> {
+  const sql = await getSql();
+  try {
+    const result = await sql`
+      SELECT id, name, phone, service, address, comment, status, source, archived, createdAt, parts, partsDone
+      FROM ${sql.identifier(T.leads)}
+    `;
+    return (result[0] ?? []) as Row[];
+  } catch {
+    const result = await sql`
+      SELECT id, name, phone, service, address, comment, status, source, archived, createdAt
+      FROM ${sql.identifier(T.leads)}
+    `;
+    return (result[0] ?? []) as Row[];
+  }
+}
+
+/** Одна заявка по id. */
+async function selectLeadRow(id: string): Promise<Row | undefined> {
+  const sql = await getSql();
+  try {
+    const result = await sql`
+      SELECT id, name, phone, service, address, comment, status, source, archived, createdAt, parts, partsDone
+      FROM ${sql.identifier(T.leads)} WHERE id = ${id}
+    `;
+    return ((result[0] ?? []) as Row[])[0];
+  } catch {
+    const result = await sql`
+      SELECT id, name, phone, service, address, comment, status, source, archived, createdAt
+      FROM ${sql.identifier(T.leads)} WHERE id = ${id}
+    `;
+    return ((result[0] ?? []) as Row[])[0];
+  }
+}
+
 export async function createYdbLead(input: InsertLead): Promise<Lead> {
   await ensureTables();
-  const sql = await getSql();
   const lead: Lead = {
     id: randomUUID(),
     name: input.name,
@@ -472,27 +552,26 @@ export async function createYdbLead(input: InsertLead): Promise<Lead> {
     status: input.status ?? "new",
     source: input.source ?? "site",
     archived: input.archived ?? "0",
+    parts: normalizeLeadParts(input.parts ?? []),
+    partsDone: input.partsDone === "1" ? "1" : "0",
     createdAt: new Date().toISOString(),
   };
-  await sql`
-    UPSERT INTO ${sql.identifier(T.leads)}
-      (id, name, phone, service, address, comment, status, source, archived, createdAt)      VALUES
-        (${lead.id}, ${lead.name}, ${lead.phone}, ${lead.service}, ${lead.address},
-         ${optStr(lead.comment)}, ${lead.status}, ${lead.source}, ${lead.archived}, ${lead.createdAt})
-    `;
+  await upsertLeadRow(lead);
   return lead;
 }
 
 export async function listYdbLeads(): Promise<Lead[]> {
   await ensureTables();
-  const sql = await getSql();
-  const result = await sql`
-    SELECT id, name, phone, service, address, comment, status, source, archived, createdAt
-    FROM ${sql.identifier(T.leads)}
-  `;
-  return ((result[0] ?? []) as Row[])
+  return (await selectLeadRows())
     .map((row) => rowToLead(row))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Одна заявка — нужна при сохранении, чтобы понять, что именно изменилось. */
+export async function getYdbLead(id: string): Promise<Lead | undefined> {
+  await ensureTables();
+  const row = await selectLeadRow(id);
+  return row ? rowToLead(row) : undefined;
 }
 
 export async function updateYdbLead(
@@ -500,22 +579,21 @@ export async function updateYdbLead(
   patch: Partial<InsertLead>,
 ): Promise<Lead | undefined> {
   await ensureTables();
-  const sql = await getSql();
-  const result = await sql`
-    SELECT id, name, phone, service, address, comment, status, source, archived, createdAt
-    FROM ${sql.identifier(T.leads)}
-    WHERE id = ${id}
-  `;
-  const row = (result[0] ?? [])[0] as Row | undefined;
-  if (!row) return undefined;
-  const current = rowToLead(row);
-  const updated: Lead = { ...current, ...patch, comment: patch.comment ?? current.comment };
-  await sql`
-    UPSERT INTO ${sql.identifier(T.leads)}
-      (id, name, phone, service, address, comment, status, source, archived, createdAt)      VALUES
-        (${updated.id}, ${updated.name}, ${updated.phone}, ${updated.service}, ${updated.address},
-         ${optStr(updated.comment)}, ${updated.status}, ${updated.source}, ${updated.archived}, ${updated.createdAt})
-    `;
+  const current = await getYdbLead(id);
+  if (!current) return undefined;
+  const updated: Lead = {
+    ...current,
+    ...patch,
+    comment: patch.comment ?? current.comment,
+    parts: patch.parts === undefined ? current.parts : normalizeLeadParts(patch.parts),
+    partsDone:
+      patch.partsDone === undefined
+        ? current.partsDone
+        : patch.partsDone === "1"
+          ? "1"
+          : "0",
+  };
+  await upsertLeadRow(updated);
   return updated;
 }
 

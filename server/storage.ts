@@ -1,8 +1,15 @@
-import { type User, type InsertUser, type Lead, type InsertLead } from "@shared/schema";
+import {
+  normalizeLeadParts,
+  type User,
+  type InsertUser,
+  type Lead,
+  type InsertLead,
+} from "@shared/schema";
 import { randomUUID } from "crypto";
 import {
   createYdbLead,
   listYdbLeads,
+  getYdbLead,
   updateYdbLead,
   deleteYdbLead,
   getYdbSetting,
@@ -53,6 +60,8 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
   createLead(lead: InsertLead): Promise<Lead>;
   listLeads(): Promise<Lead[]>;
+  /** Одна заявка по id (нужна при сохранении — понять, что изменилось). */
+  getLead(id: string): Promise<Lead | undefined>;
   updateLead(id: string, patch: Partial<InsertLead>): Promise<Lead | undefined>;
   deleteLead(id: string): Promise<boolean>;
   // Настройки сайта (контент главной страницы и фото) — key/value.
@@ -124,6 +133,8 @@ export class MemStorage implements IStorage {
       status: insertLead.status ?? "new",
       source: insertLead.source ?? "site",
       archived: insertLead.archived ?? "0",
+      parts: normalizeLeadParts(insertLead.parts ?? []),
+      partsDone: insertLead.partsDone === "1" ? "1" : "0",
       id: randomUUID(),
       createdAt: new Date().toISOString(),
     };
@@ -138,11 +149,27 @@ export class MemStorage implements IStorage {
     );
   }
 
+  async getLead(id: string): Promise<Lead | undefined> {
+    if (this.useYdb) return getYdbLead(id);
+    return this.leads.get(id);
+  }
+
   async updateLead(id: string, patch: Partial<InsertLead>): Promise<Lead | undefined> {
     if (this.useYdb) return updateYdbLead(id, patch);
     const current = this.leads.get(id);
     if (!current) return undefined;
-    const updated: Lead = { ...current, ...patch, comment: patch.comment ?? current.comment };
+    const updated: Lead = {
+      ...current,
+      ...patch,
+      comment: patch.comment ?? current.comment,
+      parts: patch.parts === undefined ? current.parts : normalizeLeadParts(patch.parts),
+      partsDone:
+        patch.partsDone === undefined
+          ? current.partsDone
+          : patch.partsDone === "1"
+            ? "1"
+            : "0",
+    };
     this.leads.set(id, updated);
     return updated;
   }

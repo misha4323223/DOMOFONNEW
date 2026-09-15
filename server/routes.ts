@@ -2,7 +2,14 @@ import type { Express, NextFunction, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
-import { insertLeadSchema, type Lead } from "@shared/schema";
+import {
+  insertLeadSchema,
+  leadPartsDiff,
+  normalizeLeadParts,
+  type Lead,
+  type LeadPart,
+  type LeadPartDelta,
+} from "@shared/schema";
 import { SERVICE_LABELS } from "@shared/services";
 import { notifyNewLead, notifyNewReview, notifyChatMessage } from "./push";
 import {
@@ -373,6 +380,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Список заявок — только для админа
+  /**
+   * Изменить остатки расходников по заявке (delta < 0 — списать).
+   *
+   * Позиция могла быть удалена из расходников — тогда изменение просто
+   * пропускаем: сохранение заявки из-за этого падать не должно.
+   */
+  async function applyStockDeltas(deltas: LeadPartDelta[]): Promise<void> {
+    for (const d of deltas) {
+      if (!d.stockId || !d.delta) continue;
+      try {
+        const item = await storage.adjustStockItem(d.stockId, d.delta);
+        if (!item) {
+          console.warn(`[stock] Позиция «${d.name}» не найдена — остаток не изменён`);
+        }
+      } catch (err) {
+        console.error(`[stock] Не удалось изменить остаток «${d.name}»:`, err);
+      }
+    }
+  }
+
   app.get("/api/leads", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
     const leads = await storage.listLeads();
     return res.json(leads);
@@ -380,22 +407,71 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Обновление и удаление заявки — только для админа
   app.patch("/api/leads/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
-    // Источник заявки админ менять не может — он проставляется при создании
-    const parsed = insertLeadSchema.partial().omit({ source: true }).safeParse(req.body);
+    // Источник и отметку «расходники списаны» админ менять не может:
+    // источник проставляется при создании, а отметку ведёт сам сервер ниже.
+    const parsed = insertLeadSchema.partial().omit({ source: true, partsDone: true }).safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: "Проверьте данные заявки", errors: parsed.error.flatten() });
     }
-    const lead = await storage.updateLead(req.params.id, parsed.data);
-    return lead ? res.json(lead) : res.status(404).json({ message: "Заявка не найдена" });
+    const before = await storage.getLead(req.params.id);
+    if (!before) {
+      return res.status(404).json({ message: "Заявка не найдена" });
+    }
+
+    const patch = { ...parsed.data } as Record<string, unknown>;
+    if (parsed.data.parts !== undefined) {
+      patch.parts = normalizeLeadParts(parsed.data.parts);
+    }
+
+    // Расходники списываются с остатка в момент, когда заявку закрывают:
+    // так это работает и для заявок, отправленных офлайн (очередь придёт позже).
+    const nextParts: LeadPart[] =
+      parsed.data.parts !== undefined ? normalizeLeadParts(parsed.data.parts) : before.parts;
+    const nextStatus = parsed.data.status ?? before.status;
+    const closed = nextStatus === "done";
+    const wasClosed = before.partsDone === "1";
+
+    // Что сделать с остатками: минус — списать, плюс — вернуть на склад
+    const deltas: LeadPartDelta[] = [];
+    if (closed && !wasClosed && nextParts.length > 0) {
+      // Заявка закрыта впервые — списываем всё, что к ней прикреплено
+      deltas.push(...nextParts.map((p) => ({ ...p, delta: -p.qty })));
+      patch.partsDone = "1";
+    } else if (closed && wasClosed) {
+      // Уже была выполнена — если состав расходников потом поправили,
+      // списываем только разницу
+      deltas.push(...leadPartsDiff(before.parts, nextParts));
+    } else if (!closed && wasClosed) {
+      // Вернули заявку в работу — расходники возвращаются на остаток
+      deltas.push(...before.parts.map((p) => ({ ...p, delta: p.qty })));
+      patch.partsDone = "0";
+    }
+
+    // Сначала сохраняем заявку вместе с отметкой «списано», и только потом
+    // меняем остатки: иначе повторная отправка той же правки (например, из
+    // офлайн-очереди) списала бы расходники дважды.
+    const lead = await storage.updateLead(req.params.id, patch);
+    if (!lead) {
+      return res.status(404).json({ message: "Заявка не найдена" });
+    }
+    await applyStockDeltas(deltas);
+    return res.json(lead);
   }));
 
   app.delete("/api/leads/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    // Сначала читаем заявку: у выполненной списаны расходники, и при удалении
+    // их надо вернуть на остаток — иначе они «пропадут» вместе с заявкой.
+    const before = await storage.getLead(req.params.id);
     const deleted = await storage.deleteLead(req.params.id);
-    if (deleted) {
-      // Удаляем заявку — привязанные заметки остаются, но отвязываются
-      await storage.unlinkNotesByLead(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ message: "Заявка не найдена" });
     }
-    return deleted ? res.status(204).send() : res.status(404).json({ message: "Заявка не найдена" });
+    // Удаляем заявку — привязанные заметки остаются, но отвязываются
+    await storage.unlinkNotesByLead(req.params.id);
+    if (before && before.partsDone === "1" && before.parts.length > 0) {
+      await applyStockDeltas(before.parts.map((p) => ({ ...p, delta: p.qty })));
+    }
+    return res.status(204).send();
   }));
 
   // Ручное добавление заявки из админки или мобильного приложения

@@ -27,6 +27,21 @@ export async function getCachedLeads(): Promise<Lead[]> {
 
 export type LeadStatus = "new" | "urgent" | "done";
 
+/**
+ * Расходник, израсходованный на заявке.
+ *
+ * Название и единица — снимок на момент прикрепления: позицию могут потом
+ * переименовать или удалить, а в заявке всё останется читаемым.
+ */
+export interface LeadPart {
+  /** id позиции в расходниках. */
+  stockId: string;
+  name: string;
+  unit: string;
+  /** Сколько израсходовано на этой заявке. */
+  qty: number;
+}
+
 export interface Lead {
   id: string;
   name: string;
@@ -39,6 +54,10 @@ export interface Lead {
   source?: "site" | "admin";
   /** "1" — заявка в архиве (выполнена и убрана админом), "0" — активная. */
   archived?: string;
+  /** Расходники, израсходованные на заявке. */
+  parts?: LeadPart[];
+  /** "1" — расходники уже списаны с остатка. Считает сервер. */
+  partsDone?: string;
   createdAt: string;
 }
 
@@ -54,7 +73,29 @@ export type LeadPatch = Partial<LeadInput> & {
   status?: LeadStatus;
   /** "1" — в архив, "0" — вернуть из архива. */
   archived?: string;
+  /** Расходники заявки. Списываются, когда заявка становится выполненной. */
+  parts?: LeadPart[];
 };
+
+/**
+ * Краткое описание расходников для карточки: «Панель ×1, Трубка ×2».
+ * Показываем не больше `limit` позиций, остальное — «и ещё N».
+ */
+export function partsSummary(parts: LeadPart[] | undefined, limit = 2): string {
+  const list = parts ?? [];
+  if (list.length === 0) return "";
+  const shown = list
+    .slice(0, limit)
+    .map((p) => `${p.name} ×${formatQty(p.qty)}`)
+    .join(", ");
+  const rest = list.length - limit;
+  return rest > 0 ? `${shown} и ещё ${rest}` : shown;
+}
+
+/** Всего единиц расхода по заявке (для суммы «5 шт»). */
+export function partsTotal(parts: LeadPart[] | undefined): number {
+  return (parts ?? []).reduce((sum, p) => sum + p.qty, 0);
+}
 
 export const LEAD_STATUSES: { value: LeadStatus; label: string }[] = [
   { value: "new", label: "Новая" },

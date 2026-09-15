@@ -19,11 +19,13 @@ import {
   serviceLabel,
   LEAD_STATUSES,
   cacheLeads,
+  formatQty,
   getCachedLeads,
   cacheNotes,
   getCachedNotes,
   isNetworkError,
   isServerError,
+  partsSummary,
   type Lead,
   type LeadStatus,
   type Note,
@@ -251,6 +253,26 @@ export function LeadsScreen({ token, onEdit }: Props) {
 
   const changeStatus = async (lead: Lead, next: LeadStatus) => {
     if (lead.status === next) return;
+    // Закрываем заявку, к которой прикреплены расходники — предупреждаем,
+    // что они спишутся с остатка в машине (сервер спишет в этот же момент).
+    const parts = lead.parts ?? [];
+    if (next === "done" && parts.length > 0 && lead.partsDone !== "1") {
+      Alert.alert(
+        "Выполнить заявку?",
+        `С остатка спишется: ${parts
+          .map((p) => `${p.name} ×${formatQty(p.qty)}`)
+          .join(", ")}.`,
+        [
+          { text: "Отмена", style: "cancel" },
+          { text: "Выполнена", onPress: () => void applyStatus(lead, next) },
+        ],
+      );
+      return;
+    }
+    await applyStatus(lead, next);
+  };
+
+  const applyStatus = async (lead: Lead, next: LeadStatus) => {
     // Оптимистично меняем сразу
     setLeads((prev) =>
       prev.map((l) => (l.id === lead.id ? { ...l, status: next } : l)),
@@ -478,6 +500,18 @@ export function LeadsScreen({ token, onEdit }: Props) {
         </View>
         {item.comment ? (
           <Text style={styles.cardComment}>💬 {item.comment}</Text>
+        ) : null}
+        {/* Расходники, ушедшие на заявку: видно сразу в карточке */}
+        {(item.parts ?? []).length > 0 ? (
+          <View style={styles.partsRow}>
+            <Ionicons name="cube-outline" size={13} color={colors.textMuted} />
+            <Text style={styles.partsRowText} numberOfLines={1}>
+              {partsSummary(item.parts)}
+            </Text>
+            {item.partsDone === "1" ? (
+              <Text style={styles.partsRowDone}>списано</Text>
+            ) : null}
+          </View>
         ) : null}
         {leadNotes.length > 0 ? (
           <View style={styles.notesBlock}>
@@ -871,6 +905,24 @@ const styles = StyleSheet.create({
   },
   cardDone: {
     opacity: 0.7,
+  },
+  // Строка расходников в карточке: что ушло на заявку
+  partsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 2,
+  },
+  partsRowText: {
+    flex: 1,
+    color: colors.textMuted,
+    fontSize: 12.5,
+    fontWeight: "600",
+  },
+  partsRowDone: {
+    color: "#4ade80",
+    fontSize: 11.5,
+    fontWeight: "700",
   },
   statusRow: {
     flexDirection: "row",

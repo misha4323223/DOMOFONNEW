@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -21,13 +22,18 @@ import {
   SERVICES,
   LEAD_STATUSES,
   cacheNotes,
+  cacheStock,
+  formatQty,
   getCachedNotes,
+  getCachedStock,
   isNetworkError,
   isServerError,
   type Lead,
   type LeadInput,
+  type LeadPart,
   type LeadStatus,
   type Note,
+  type StockItem,
 } from "../api";
 import { queueLeadCreate, queueLeadUpdate } from "../sync";
 import { colors } from "../theme";
@@ -54,6 +60,48 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
 
   // Заметки, привязанные к заявке (просмотр; привязывают во вкладке «Заметки»)
   const [leadNotes, setLeadNotes] = useState<Note[]>([]);
+
+  // --- Расходники, израсходованные на заявке ---
+  // Прикрепляем позиции из «Расходников»; когда заявку закрывают, сервер
+  // списывает их с остатка (см. server/routes.ts).
+  const [parts, setParts] = useState<LeadPart[]>(lead?.parts ?? []);
+  const [stock, setStock] = useState<StockItem[]>([]);
+  const [partsPicker, setPartsPicker] = useState(false);
+
+  /** Добавить позицию к заявке (или +1, если она уже прикреплена). */
+  const addPart = (item: StockItem): void => {
+    setParts((prev) => {
+      const found = prev.find((p) => p.stockId === item.id);
+      if (found) {
+        return prev.map((p) =>
+          p.stockId === item.id ? { ...p, qty: p.qty + 1 } : p,
+        );
+      }
+      return [
+        ...prev,
+        { stockId: item.id, name: item.name, unit: item.unit, qty: 1 },
+      ];
+    });
+  };
+
+  /** Изменить количество; ноль и меньше — убрать позицию. */
+  const setPartQty = (stockId: string, qty: number): void => {
+    setParts((prev) =>
+      qty <= 0
+        ? prev.filter((p) => p.stockId !== stockId)
+        : prev.map((p) => (p.stockId === stockId ? { ...p, qty } : p)),
+    );
+  };
+
+  const removePart = (stockId: string): void => {
+    setParts((prev) => prev.filter((p) => p.stockId !== stockId));
+  };
+
+  /** Остаток позиции в машине (чтобы видеть, хватает ли). */
+  const stockQtyOf = (stockId: string): number | null => {
+    const item = stock.find((i) => i.id === stockId);
+    return item ? item.qty : null;
+  };
 
   // --- Голосовой ввод: диктуем фразу, поля заполняются сами ---
   const [dictating, setDictating] = useState(false);
@@ -193,7 +241,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
     }
   };
 
-  // Подгружаем привязанные заметки при открытии формы редактирования
+  // Подгружаем привязанные заметки и расходники при открытии формы
   useEffect(() => {
     if (!lead) return;
     let cancelled = false;
@@ -211,6 +259,16 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
         if (!cancelled) {
           setLeadNotes(cached.filter((n) => n.leadId === lead.id));
         }
+      }
+
+      // Расходники: без сети берём последний сохранённый список
+      try {
+        const items = await api.stock(token);
+        if (!cancelled) setStock(items ?? []);
+        await cacheStock(items ?? []);
+      } catch {
+        const cached = await getCachedStock();
+        if (!cancelled) setStock(cached);
       }
     })();
     return () => {
@@ -234,7 +292,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
     };
     try {
       if (lead) {
-        await api.updateLead(token, lead.id, { ...body, status });
+        await api.updateLead(token, lead.id, { ...body, status, parts });
       } else {
         await api.createLead(token, body);
       }
@@ -242,9 +300,10 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
     } catch (e) {
       if (isNetworkError(e) || isServerError(e)) {
         // Нет связи — сохраняем офлайн: изменение отправится само,
-        // когда интернет появится.
+        // когда интернет появится. Расходники спишутся на сервере
+        // в момент, когда до него дойдёт перевод заявки в «Выполнена».
         if (lead) {
-          await queueLeadUpdate(lead.id, { ...body, status });
+          await queueLeadUpdate(lead.id, { ...body, status, parts });
         } else {
           const clientId = `local-${Date.now()}-${Math.random()
             .toString(36)
@@ -514,6 +573,96 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           </>
         ) : null}
 
+        {/* Расходники, ушедшие на эту заявку: списываются при выполнении */}
+        {lead ? (
+          <>
+            <Text style={styles.label}>🧰 Израсходовано на заявке</Text>
+
+            {parts.length === 0 ? (
+              <Text style={styles.partsHint}>
+                Пока ничего не прикреплено. Добавьте панель, трубку, замок — при
+                сохранении выполненной заявки они спишутся с остатка в машине.
+              </Text>
+            ) : null}
+
+            {parts.map((p) => {
+              const left = stockQtyOf(p.stockId);
+              const short = left !== null && p.qty > left;
+              return (
+                <View key={p.stockId} style={styles.partRow}>
+                  <View style={styles.partInfo}>
+                    <Text style={styles.partName} numberOfLines={1}>
+                      {p.name}
+                    </Text>
+                    <Text style={[styles.partStock, short && styles.partStockShort]}>
+                      {left === null
+                        ? "нет в расходниках"
+                        : short
+                          ? `в машине только ${formatQty(left)} ${p.unit}`
+                          : `в машине ${formatQty(left)} ${p.unit}`}
+                    </Text>
+                  </View>
+
+                  {/* Количество: − / + и значение (шаг 1) */}
+                  <View style={styles.partStepper}>
+                    <Pressable
+                      style={styles.partStepButton}
+                      onPress={() =>
+                        setPartQty(p.stockId, Math.round((p.qty - 1) * 1000) / 1000)
+                      }
+                      hitSlop={6}
+                    >
+                      <Ionicons name="remove" size={15} color={colors.text} />
+                    </Pressable>
+                    <Text style={styles.partQty}>
+                      {formatQty(p.qty)} {p.unit}
+                    </Text>
+                    <Pressable
+                      style={styles.partStepButton}
+                      onPress={() => setPartQty(p.stockId, p.qty + 1)}
+                      hitSlop={6}
+                    >
+                      <Ionicons name="add" size={15} color={colors.text} />
+                    </Pressable>
+                  </View>
+
+                  <Pressable onPress={() => removePart(p.stockId)} hitSlop={8}>
+                    <Ionicons name="close-circle" size={19} color={colors.textMuted} />
+                  </Pressable>
+                </View>
+              );
+            })}
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.addPartButton,
+                pressed && { opacity: 0.85 },
+              ]}
+              onPress={() => setPartsPicker(true)}
+            >
+              <Ionicons name="add" size={16} color={colors.primary} />
+              <Text style={styles.addPartText}>Добавить расходник</Text>
+            </Pressable>
+
+            {/* Что именно уйдёт с остатка при сохранении */}
+            {status === "done" && parts.length > 0 && lead.partsDone !== "1" ? (
+              <View style={styles.writeOffCard}>
+                <Ionicons name="checkmark-circle" size={16} color="#4ade80" />
+                <Text style={styles.writeOffText}>
+                  При сохранении спишется с остатка:{" "}
+                  {parts.map((p) => `${p.name} ×${formatQty(p.qty)}`).join(", ")}
+                </Text>
+              </View>
+            ) : null}
+
+            {lead.partsDone === "1" ? (
+              <Text style={styles.partsDoneHint}>
+                ✓ Уже списано с остатка. Измените состав — разница учтётся сама.
+              </Text>
+            ) : null}
+          </>
+        ) : null}
+
         {lead && leadNotes.length > 0 ? (
           <>
             <Text style={styles.label}>📌 Привязанные заметки</Text>
@@ -553,6 +702,69 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
 
       {/* Окно выбора города — показывается, только когда город не ясен из адреса */}
       {picker}
+
+      {/* Выбор расходника из того, что лежит в машине */}
+      <Modal
+        visible={partsPicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setPartsPicker(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setPartsPicker(false)}>
+          <Pressable style={styles.modalSheet} onPress={() => {}}>
+            <Text style={styles.modalTitle}>Что израсходовали?</Text>
+            <Text style={styles.modalSubtitle}>
+              Список — ваши расходники в машине. Тап добавляет позицию к заявке.
+            </Text>
+
+            <ScrollView style={styles.modalList} keyboardShouldPersistTaps="handled">
+              {stock.length === 0 ? (
+                <Text style={styles.modalEmpty}>
+                  Расходники не заведены. Откройте «Ещё → Расходники» и добавьте
+                  позиции.
+                </Text>
+              ) : (
+                stock.map((item) => {
+                  const chosen = parts.find((p) => p.stockId === item.id);
+                  return (
+                    <Pressable
+                      key={item.id}
+                      style={[styles.modalRow, chosen && styles.modalRowActive]}
+                      onPress={() => addPart(item)}
+                    >
+                      <View style={styles.partInfo}>
+                        <Text style={styles.modalRowName} numberOfLines={1}>
+                          {item.name}
+                        </Text>
+                        <Text style={styles.modalRowMeta}>
+                          в машине {formatQty(item.qty)} {item.unit}
+                        </Text>
+                      </View>
+                      {chosen ? (
+                        <Text style={styles.modalChosen}>
+                          ×{formatQty(chosen.qty)}
+                        </Text>
+                      ) : (
+                        <Ionicons name="add-circle-outline" size={20} color={colors.primary} />
+                      )}
+                    </Pressable>
+                  );
+                })
+              )}
+            </ScrollView>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.modalDone,
+                pressed && { opacity: 0.85 },
+              ]}
+              onPress={() => setPartsPicker(false)}
+            >
+              <Text style={styles.modalDoneText}>Готово</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -676,6 +888,186 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginBottom: 6,
+  },
+  // --- Расходники на заявке ---
+  partsHint: {
+    color: colors.textMuted,
+    fontSize: 12.5,
+    lineHeight: 17,
+  },
+  partRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.inputBg,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginBottom: 6,
+  },
+  partInfo: {
+    flex: 1,
+  },
+  partName: {
+    color: colors.text,
+    fontSize: 14.5,
+    fontWeight: "600",
+  },
+  partStock: {
+    color: colors.textMuted,
+    fontSize: 11.5,
+    marginTop: 2,
+  },
+  // Позиции не хватает в машине — предупреждаем цветом
+  partStockShort: {
+    color: "#fbbf24",
+  },
+  partStepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    paddingHorizontal: 4,
+    paddingVertical: 3,
+  },
+  partStepButton: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.inputBg,
+  },
+  partQty: {
+    color: colors.text,
+    fontSize: 13.5,
+    fontWeight: "700",
+    minWidth: 48,
+    textAlign: "center",
+  },
+  addPartButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 12,
+    paddingVertical: 11,
+    backgroundColor: "rgba(245,162,11,0.08)",
+  },
+  addPartText: {
+    color: colors.primary,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  // Зелёная плашка «что спишется» — в цвет статуса «Выполнена»
+  writeOffCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: "rgba(34,197,94,0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(34,197,94,0.45)",
+  },
+  writeOffText: {
+    flex: 1,
+    color: "#4ade80",
+    fontSize: 12.5,
+    fontWeight: "600",
+    lineHeight: 17,
+  },
+  partsDoneHint: {
+    color: "#4ade80",
+    fontSize: 12.5,
+    marginTop: 4,
+  },
+
+  // --- Окно выбора расходника ---
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    justifyContent: "flex-end",
+  },
+  modalSheet: {
+    backgroundColor: colors.card,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    padding: 16,
+    maxHeight: "80%",
+  },
+  modalTitle: {
+    color: colors.text,
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  modalSubtitle: {
+    color: colors.textMuted,
+    fontSize: 12.5,
+    lineHeight: 17,
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  modalList: {
+    maxHeight: 340,
+  },
+  modalEmpty: {
+    color: colors.textMuted,
+    fontSize: 13.5,
+    lineHeight: 19,
+    paddingVertical: 12,
+  },
+  modalRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.inputBg,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 6,
+  },
+  modalRowActive: {
+    borderColor: "#4ade80",
+    backgroundColor: "rgba(34,197,94,0.12)",
+  },
+  modalRowName: {
+    color: colors.text,
+    fontSize: 14.5,
+    fontWeight: "600",
+  },
+  modalRowMeta: {
+    color: colors.textMuted,
+    fontSize: 11.5,
+    marginTop: 2,
+  },
+  modalChosen: {
+    color: "#4ade80",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  modalDone: {
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  modalDoneText: {
+    color: colors.primaryForeground,
+    fontSize: 15.5,
+    fontWeight: "700",
   },
   noteText: {
     color: colors.text,
