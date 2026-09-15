@@ -18,6 +18,7 @@ export type NavTarget =
   | "archive"
   | "notes"
   | "stock"
+  | "route"
   | "reviews"
   | "content"
   | "scan"
@@ -53,6 +54,7 @@ const MORE_ITEMS: {
   label: string;
   tint?: string;
 }[] = [
+  { target: "route", iconName: "navigate-outline", label: "Маршрут", tint: colors.primary },
   { target: "scan", iconName: "camera-outline", label: "Блокнот" },
   { target: "notes", iconName: "document-text-outline", label: "Заметки" },
   { target: "stock", iconName: "cube-outline", label: "Расходники" },

@@ -305,6 +305,20 @@ export const api = {
   deleteStockItem: (token: string, id: string) =>
     request(`/api/stock/${id}`, { method: "DELETE", token }),
 
+  // --- Маршрут на день ---
+
+  /** План объезда с сервера (пустой план — маршрут ещё не собирали). */
+  route: (token: string) =>
+    request("/api/admin/route", { token }) as Promise<RoutePlan>,
+
+  /** Сохранить план объезда на сервере. */
+  saveRoute: (token: string, plan: RoutePlan) =>
+    request("/api/admin/route", {
+      method: "PUT",
+      body: plan,
+      token,
+    }) as Promise<RoutePlan>,
+
   // --- Отзывы клиентов (модерация) ---
 
   /** Все отзывы (включая ожидающие модерации) — только для админа. */
@@ -446,6 +460,63 @@ export interface StockItemInput {
 }
 
 export type StockItemPatch = Partial<StockItemInput>;
+
+// --- Маршрут на день ---
+
+/**
+ * План объезда заявок.
+ *
+ * Порядок собирает само приложение (сначала город, внутри города — улица и
+ * дом), сервер только хранит план — см. server/routes.ts.
+ * «Сделано» отдельно не отмечается: это статус самой заявки, поэтому отметка
+ * не может разъехаться с реальностью.
+ */
+export interface RoutePlan {
+  /** id заявок в порядке объезда. */
+  stops: string[];
+  /** Когда маршрут запущен (ISO); null — план ещё собирается. */
+  startedAt: string | null;
+  /** Когда план последний раз менялся (ISO). По нему выбираем свежую версию. */
+  updatedAt: string;
+}
+
+/** Больше этого числа точек в один маршрут не берём. */
+export const ROUTE_MAX_STOPS = 50;
+
+/** Пустой план: маршрут ещё не собирали. */
+export function emptyRoutePlan(): RoutePlan {
+  return { stops: [], startedAt: null, updatedAt: "" };
+}
+
+/**
+ * Привести к плану что угодно (ответ сервера, кеш в телефоне).
+ * Копия серверной normalizeRoutePlan: мобильное приложение не может
+ * импортировать shared/ (Metro не видит файлы за пределами mobile/).
+ */
+export function normalizeRoutePlan(value: unknown): RoutePlan {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<
+    string,
+    unknown
+  >;
+  const stops: string[] = [];
+  if (Array.isArray(raw.stops)) {
+    for (const item of raw.stops) {
+      const id = typeof item === "string" ? item.trim() : "";
+      if (!id || stops.includes(id)) continue;
+      stops.push(id);
+      if (stops.length >= ROUTE_MAX_STOPS) break;
+    }
+  }
+  const startedAt =
+    typeof raw.startedAt === "string" && raw.startedAt.trim()
+      ? raw.startedAt.trim()
+      : null;
+  const updatedAt =
+    typeof raw.updatedAt === "string" && raw.updatedAt.trim()
+      ? raw.updatedAt.trim()
+      : new Date().toISOString();
+  return { stops, startedAt, updatedAt };
+}
 
 /** Пора закупать: остаток дошёл до минимума или ниже. */
 export function isLowStock(item: StockItem): boolean {

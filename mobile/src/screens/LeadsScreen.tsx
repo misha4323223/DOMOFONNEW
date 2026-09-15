@@ -47,11 +47,14 @@ import {
   staleSummary,
 } from "../leadAge";
 import { useRouteCity } from "../components/CityPicker";
+import { loadLocalRoute } from "../route";
 import { callPhone } from "../phone";
 
 interface Props {
   token: string;
   onEdit: (lead: Lead) => void;
+  /** Открыть экран маршрута (плашка «продолжить маршрут» во время рейса). */
+  onOpenRoute?: () => void;
 }
 
 /**
@@ -108,7 +111,7 @@ async function registerPushToken(token: string) {
   }
 }
 
-export function LeadsScreen({ token, onEdit }: Props) {
+export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
@@ -118,6 +121,9 @@ export function LeadsScreen({ token, onEdit }: Props) {
   const [isOffline, setIsOffline] = useState(false);
   // Сколько изменений ждёт отправки (офлайн-очередь)
   const { pending: pendingCount, revision } = useSyncState();
+  // Запущенный маршрут на день: показываем плашку «продолжить». Без сети —
+  // план читается из телефона, поэтому запросов здесь нет.
+  const [route, setRoute] = useState<{ done: number; total: number } | null>(null);
 
   // Активные заявки — без ушедших в архив (archived === "1")
   const activeLeads = leads.filter((l) => l.archived !== "1");
@@ -225,6 +231,27 @@ export function LeadsScreen({ token, onEdit }: Props) {
     },
     [token],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const plan = await loadLocalRoute();
+      if (cancelled) return;
+      if (!plan.startedAt) {
+        setRoute(null);
+        return;
+      }
+      const byId = new Map(leads.map((l) => [l.id, l]));
+      const ids = plan.stops.filter((id) => byId.has(id));
+      setRoute({
+        total: ids.length,
+        done: ids.filter((id) => byId.get(id)?.status === "done").length,
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [leads]);
 
   useEffect(() => {
     // Сначала показываем кеш мгновенно (без спиннера), потом обновляем
@@ -618,6 +645,20 @@ export function LeadsScreen({ token, onEdit }: Props) {
         </View>
       </View>
 
+      {/* Маршрут на день уже запущен — вернуться в рейс можно одним тапом */}
+      {route && route.total > 0 && onOpenRoute ? (
+        <Pressable
+          style={({ pressed }) => [styles.routeBanner, pressed && { opacity: 0.85 }]}
+          onPress={onOpenRoute}
+        >
+          <Ionicons name="car-sport" size={17} color={colors.primary} />
+          <Text style={styles.routeBannerText}>
+            Маршрут: выполнено {route.done} из {route.total}
+          </Text>
+          <Text style={styles.routeBannerAction}>Продолжить</Text>
+        </Pressable>
+      ) : null}
+
       {/* Предупреждение о заявках, которые висят больше недели.
           Тап по плашке оставляет в списке только их. */}
       {staleStats.count > 0 ? (
@@ -776,6 +817,27 @@ const styles = StyleSheet.create({
     height: 36,
   },
   // Плашка-предупреждение о зависших заявках
+  routeBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    backgroundColor: "rgba(245,162,11,0.14)",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(245,162,11,0.35)",
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+  },
+  routeBannerText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 13.5,
+    fontWeight: "700",
+  },
+  routeBannerAction: {
+    color: colors.primary,
+    fontSize: 13.5,
+    fontWeight: "800",
+  },
   staleBanner: {
     flexDirection: "row",
     alignItems: "center",

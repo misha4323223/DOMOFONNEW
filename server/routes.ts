@@ -6,6 +6,9 @@ import {
   insertLeadSchema,
   leadPartsDiff,
   normalizeLeadParts,
+  normalizeRoutePlan,
+  parseRoutePlan,
+  serializeRoutePlan,
   type Lead,
   type LeadPart,
   type LeadPartDelta,
@@ -30,6 +33,8 @@ import {
 // Фото первого экрана — отдельными ключами (у записи YDB есть лимит ~400 КБ,
 // поэтому фото не кладём внутрь JSON с текстами).
 const CONTENT_SETTING_KEY = "content:home";
+// Маршрут на день — тоже один JSON-документ в настройках (см. /api/admin/route).
+const ROUTE_SETTING_KEY = "route:plan";
 const IMAGE_SETTING_PREFIX = "image:";
 // Лимит data-url фото: ~400 КБ на запись YDB; клиент сжимает фото до webp.
 const MAX_IMAGE_DATA_URL_LENGTH = 400_000;
@@ -507,6 +512,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     await Promise.allSettled([notifyNewLead(lead), sendLeadToVk(lead)]);
 
     return res.status(201).json(lead);
+  }));
+
+  // --- Маршрут на день (только мобильное приложение) ---
+  // Порядок объезда собирает приложение (по городам и улицам), сервер его
+  // только хранит — чтобы маршрут не потерялся при переустановке приложения
+  // и был одинаковым на всех телефонах. В веб-админке интерфейса нет: там
+  // по-прежнему только заявки.
+  app.get("/api/admin/route", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
+    const stored = await storage.getSetting(ROUTE_SETTING_KEY);
+    return res.json(parseRoutePlan(stored?.value));
+  }));
+
+  app.put("/api/admin/route", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    // Сервер собирает и проверяет план сам: пустые id и повторы отбрасываем,
+    // поэтому «мусор» в теле запроса не сломает маршрут.
+    const plan = normalizeRoutePlan(req.body);
+    await storage.setSetting(ROUTE_SETTING_KEY, serializeRoutePlan(plan));
+    return res.json(plan);
   }));
 
   // --- Заметки (только мобильное приложение) ---

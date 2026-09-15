@@ -14,6 +14,7 @@ import { ReviewScreen } from "./src/screens/ReviewScreen";
 import { ContentScreen } from "./src/screens/ContentScreen";
 import { NotesScreen } from "./src/screens/NotesScreen";
 import { StockScreen } from "./src/screens/StockScreen";
+import { RouteScreen } from "./src/screens/RouteScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ReviewsScreen } from "./src/screens/ReviewsScreen";
 import { ArchiveScreen } from "./src/screens/ArchiveScreen";
@@ -51,6 +52,7 @@ type Screen =
   | { name: "content" }
   | { name: "notes" }
   | { name: "stock" }
+  | { name: "route" }
   | { name: "chat" }
   | { name: "reviews" }
   | { name: "archive" }
@@ -260,6 +262,7 @@ export default function App() {
     screen.name === "archive" ||
     screen.name === "notes" ||
     screen.name === "stock" ||
+    screen.name === "route" ||
     screen.name === "reviews" ||
     screen.name === "content" ||
     screen.name === "about";
@@ -297,6 +300,9 @@ export default function App() {
         break;
       case "stock":
         setScreen({ name: "stock" });
+        break;
+      case "route":
+        setScreen({ name: "route" });
         break;
       case "reviews":
         setScreen({ name: "reviews" });
@@ -385,6 +391,17 @@ export default function App() {
         <StockScreen token={token} onBack={() => setScreen({ name: "leads" })} />
       </View>
     );
+  } else if (screen.name === "route") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <RouteScreen
+          token={token}
+          onBack={() => setScreen({ name: "leads" })}
+          onOpenLead={(lead) => setScreen({ name: "form", lead })}
+        />
+      </View>
+    );
   } else if (screen.name === "chat") {
     content = (
       <View style={styles.root}>
@@ -449,6 +466,7 @@ export default function App() {
           key={reloadKey}
           token={token}
           onEdit={(lead) => setScreen({ name: "form", lead })}
+          onOpenRoute={() => setScreen({ name: "route" })}
         />
       </View>
     );

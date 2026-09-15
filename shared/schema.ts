@@ -178,5 +178,72 @@ export type Lead = typeof leads.$inferSelect & {
   partsDone: string;
 };
 
+/**
+ * Маршрут на день — заявки в порядке объезда.
+ *
+ * Порядок собирает приложение (по городам, внутри города — по улицам и домам),
+ * сервер только хранит план одним JSON-документом в key/value-таблице настроек
+ * (ключ «route:plan»). Так маршрут переживает переустановку приложения и
+ * одинаков на всех телефонах админов.
+ *
+ * Выполненные заявки в плане не помечаются: «сделано» — это статус самой
+ * заявки, поэтому отметка не может разъехаться с реальностью.
+ */
+export interface RoutePlan {
+  /** id заявок в порядке объезда. */
+  stops: string[];
+  /** Когда маршрут запущен (ISO); null — план ещё собирается. */
+  startedAt: string | null;
+  /** Когда план последний раз менялся (ISO). По нему выбираем свежую версию. */
+  updatedAt: string;
+}
+
+/** Больше этого числа точек в один маршрут не собираем. */
+export const ROUTE_MAX_STOPS = 50;
+
+/** Пустой план: маршрут ещё не собирали. */
+export function emptyRoutePlan(): RoutePlan {
+  return { stops: [], startedAt: null, updatedAt: "" };
+}
+
+/** Привести произвольное значение (тело запроса или JSON из БД) к плану. */
+export function normalizeRoutePlan(value: unknown): RoutePlan {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const stops: string[] = [];
+  if (Array.isArray(raw.stops)) {
+    for (const item of raw.stops) {
+      const id = typeof item === "string" ? item.trim() : "";
+      // Повторы в плане бессмысленны: одна заявка — одна точка
+      if (!id || stops.includes(id)) continue;
+      stops.push(id);
+      if (stops.length >= ROUTE_MAX_STOPS) break;
+    }
+  }
+  const startedAt =
+    typeof raw.startedAt === "string" && raw.startedAt.trim()
+      ? raw.startedAt.trim()
+      : null;
+  const updatedAt =
+    typeof raw.updatedAt === "string" && raw.updatedAt.trim()
+      ? raw.updatedAt.trim()
+      : new Date().toISOString();
+  return { stops, startedAt, updatedAt };
+}
+
+/** Разобрать план из строки БД (JSON). Битое значение — пустой план. */
+export function parseRoutePlan(raw: unknown): RoutePlan {
+  if (typeof raw !== "string" || !raw.trim()) return emptyRoutePlan();
+  try {
+    return normalizeRoutePlan(JSON.parse(raw));
+  } catch {
+    return emptyRoutePlan();
+  }
+}
+
+/** Строка для хранения в БД. */
+export function serializeRoutePlan(plan: RoutePlan): string {
+  return JSON.stringify(plan);
+}
+
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
