@@ -7,6 +7,8 @@ import { CookieBanner } from "@/components/CookieBanner";
 import Home from "@/pages/Home";
 import Admin from "@/pages/Admin";
 import Privacy from "@/pages/Privacy";
+// Страницы, созданные в админке: /p/<slug>
+import SitePage from "@/pages/SitePage";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -14,6 +16,7 @@ function Router() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/privacy" component={Privacy} />
+      <Route path="/p/:slug" component={SitePage} />
       <Route path="/admin" component={Admin} />
       <Route component={NotFound} />
     </Switch>

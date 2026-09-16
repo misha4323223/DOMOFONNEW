@@ -27,6 +27,13 @@ import {
   HERO_IMAGE_KEYS,
   type HomeContent,
 } from "@shared/content";
+import {
+  pagePath,
+  sanitizePages,
+  visiblePages,
+  type SitePage,
+} from "@shared/pages";
+import { sanitizePrivacy } from "@shared/privacy";
 
 // --- Контент главной страницы (глубокий редактор в админке) ---
 // Хранится в key/value-таблице настроек одним JSON-документом.
@@ -35,6 +42,15 @@ import {
 const CONTENT_SETTING_KEY = "content:home";
 // Маршрут на день — тоже один JSON-документ в настройках (см. /api/admin/route).
 const ROUTE_SETTING_KEY = "route:plan";
+// Дополнительные страницы сайта (/p/<slug>) и текст страницы политики.
+const PAGES_SETTING_KEY = "pages:site";
+const PRIVACY_SETTING_KEY = "content:privacy";
+// Фото внутри страниц: ключ в настройках — image:page:<id>, публичный адрес —
+// /api/content/page-image/<id>.
+const PAGE_IMAGE_SETTING_PREFIX = "image:page:";
+const PAGE_IMAGE_ID_RE = /^[0-9a-f]{16}$/;
+// Главный адрес сайта — нужен для абсолютных ссылок в sitemap.xml.
+const SITE_ORIGIN = "https://obzor71.ru";
 const IMAGE_SETTING_PREFIX = "image:";
 // Лимит data-url фото: ~400 КБ на запись YDB; клиент сжимает фото до webp.
 const MAX_IMAGE_DATA_URL_LENGTH = 400_000;
@@ -205,6 +221,39 @@ function asyncHandler(
   };
 }
 
+/**
+ * Карта сайта: главная, политика и все видимые страницы из админки.
+ * Новые страницы попадают в sitemap сразу после сохранения — иначе Яндекс
+ * находил бы их только по ссылкам и сильно позже.
+ */
+function buildSitemap(pages: SitePage[]): string {
+  const lastmod = new Date().toISOString().slice(0, 10);
+  const entries = [
+    { loc: `${SITE_ORIGIN}/`, changefreq: "weekly", priority: "1.0" },
+    { loc: `${SITE_ORIGIN}/privacy`, changefreq: "yearly", priority: "0.3" },
+    ...pages.map((page) => ({
+      loc: `${SITE_ORIGIN}${pagePath(page.slug)}`,
+      changefreq: "monthly",
+      priority: "0.6",
+    })),
+  ];
+
+  const urls = entries
+    .map(
+      (entry) =>
+        `  <url>\n    <loc>${entry.loc.replace(/&/g, "&amp;")}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>${entry.changefreq}</changefreq>\n    <priority>${entry.priority}</priority>\n  </url>`,
+    )
+    .join("\n");
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    urls,
+    "</urlset>",
+    "",
+  ].join("\n");
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   if (!process.env.ADMIN_PASSWORD) {
     console.warn(
@@ -358,6 +407,122 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.set("Content-Type", mime);
     res.set("Cache-Control", "public, max-age=86400");
     return res.send(buffer);
+  }));
+
+  // --- Дополнительные страницы сайта (конструктор в админке) ---
+  // Страницы лежат одним JSON-документом в таблице настроек (ключ pages:site),
+  // фото — отдельными ключами. Миграций БД не требуется; в веб-админке
+  // появился раздел «Страницы», на сайте они открываются по /p/<slug>.
+
+  /** Прочитать JSON-документ из настроек: нет записи или битые данные → undefined. */
+  async function readSettingJson(key: string): Promise<unknown> {
+    const saved = await storage.getSetting(key);
+    if (!saved) return undefined;
+    try {
+      return JSON.parse(saved.value);
+    } catch {
+      console.error(`Настройка ${key} повреждена, используем значения по умолчанию`);
+      return undefined;
+    }
+  }
+
+  async function loadPages(): Promise<SitePage[]> {
+    return sanitizePages(await readSettingJson(PAGES_SETTING_KEY));
+  }
+
+  // Страницы для посетителей — только видимые (скрытые видны в админке).
+  app.get("/api/pages", asyncHandler(async (_req: Request, res: Response) => {
+    const pages = visiblePages(await loadPages());
+    res.set("Cache-Control", "public, max-age=0, must-revalidate");
+    return res.json({ pages });
+  }));
+
+  // Все страницы, включая скрытые — для редактора в админке.
+  app.get("/api/admin/pages", requireAdmin, asyncHandler(async (_req: Request, res: Response) => {
+    return res.json({ pages: await loadPages() });
+  }));
+
+  app.put("/api/admin/pages", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const pages = sanitizePages(req.body?.pages);
+    await storage.setSetting(PAGES_SETTING_KEY, JSON.stringify(pages));
+    return res.json({ ok: true, pages });
+  }));
+
+  // Фото внутри страницы: тот же формат, что у фото первого экрана (data-url
+  // сжатого webp/jpeg/png), потому что лимит записи YDB ~400 КБ.
+  app.put("/api/admin/pages/image", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const dataUrl = typeof req.body?.dataUrl === "string" ? req.body.dataUrl : "";
+    if (!IMAGE_DATA_URL_RE.test(dataUrl)) {
+      return res.status(400).json({ message: "Поддерживаются фото webp, jpeg или png" });
+    }
+    if (dataUrl.length > MAX_IMAGE_DATA_URL_LENGTH) {
+      return res.status(400).json({
+        message: "Фото слишком большое — загрузите файл поменьше (до ~300 КБ)",
+      });
+    }
+    const id = randomBytes(8).toString("hex");
+    await storage.setSetting(`${PAGE_IMAGE_SETTING_PREFIX}${id}`, dataUrl);
+    return res.json({ url: `/api/content/page-image/${id}` });
+  }));
+
+  // Удаление фото страницы (когда админ убрал его из блока).
+  app.delete("/api/admin/pages/image/:id", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    if (!PAGE_IMAGE_ID_RE.test(id)) {
+      return res.status(400).json({ message: "Неизвестное изображение" });
+    }
+    await storage.removeSetting(`${PAGE_IMAGE_SETTING_PREFIX}${id}`);
+    return res.json({ ok: true });
+  }));
+
+  // Отдача фото страницы по публичному адресу.
+  app.get("/api/content/page-image/:id", asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    if (!PAGE_IMAGE_ID_RE.test(id)) {
+      return res.status(404).json({ message: "Изображение не найдено" });
+    }
+    const saved = await storage.getSetting(`${PAGE_IMAGE_SETTING_PREFIX}${id}`);
+    if (!saved) {
+      return res.status(404).json({ message: "Изображение не найдено" });
+    }
+    const match = IMAGE_DATA_URL_BODY_RE.exec(saved.value);
+    if (!match) {
+      return res.status(500).json({ message: "Изображение повреждено" });
+    }
+    res.set("Content-Type", match[1].toLowerCase());
+    res.set("Cache-Control", "public, max-age=86400");
+    return res.send(Buffer.from(match[2], "base64"));
+  }));
+
+  // --- Политика конфиденциальности (текст правит админ) ---
+  app.get("/api/privacy", asyncHandler(async (_req: Request, res: Response) => {
+    const content = sanitizePrivacy(await readSettingJson(PRIVACY_SETTING_KEY));
+    // max-age=0: правки из админки видны на сайте сразу после перезагрузки
+    res.set("Cache-Control", "public, max-age=0, must-revalidate");
+    return res.json({ content });
+  }));
+
+  app.put("/api/admin/privacy", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const content = sanitizePrivacy(req.body?.content);
+    await storage.setSetting(PRIVACY_SETTING_KEY, JSON.stringify(content));
+    return res.json({ ok: true, content });
+  }));
+
+  // --- Карта сайта (sitemap.xml) ---
+  // Собирается на сервере: главная, политика и все видимые страницы из админки.
+  // Регистрируется до отдачи статики, поэтому перекрывает статический файл
+  // client/public/sitemap.xml (тот остаётся запасным вариантом на случай,
+  // если БД недоступна).
+  app.get("/sitemap.xml", asyncHandler(async (_req: Request, res: Response) => {
+    let pages: SitePage[] = [];
+    try {
+      pages = visiblePages(await loadPages());
+    } catch (err) {
+      console.error("Не удалось собрать sitemap по страницам сайта:", err);
+    }
+    res.type("application/xml");
+    res.set("Cache-Control", "public, max-age=3600");
+    return res.send(buildSitemap(pages));
   }));
 
   // Регистрация push-токена мобильного приложения (Expo)

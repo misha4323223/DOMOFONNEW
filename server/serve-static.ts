@@ -22,12 +22,14 @@ export function serveStatic(app: Express) {
    * Отдаём пререндер для всех путей без расширения (страницы, якоря),
    * файлы с точкой (assets и т.п.) — обычной статикой ниже.
    */
-  const serveIndex = async (_req: Request, res: Response, next: NextFunction) => {
+  const serveIndex = async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!indexHtml) {
         indexHtml = fs.readFileSync(indexPath, "utf8");
       }
-      const html = await renderIndexHtml(indexHtml);
+      // Путь нужен пререндеру: у главной, /privacy и /p/<slug> — свой текст
+      // и свои мета-теги для поисковиков.
+      const html = await renderIndexHtml(indexHtml, req.path);
       res.type("html").send(html);
     } catch (err) {
       next(err);

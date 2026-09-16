@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { FieldShell } from "@/components/EditorField";
+import { compressToWebpDataUrl } from "@/lib/imageCompress";
 import {
   Select,
   SelectContent,
@@ -235,76 +236,7 @@ function updateAt(
   };
 }
 
-// --- Сжатие загруженного фото в webp до ~370 КБ (лимит записи YDB ~400 КБ) ---
-const MAX_IMAGE_LENGTH = 370_000;
-
-async function fileToImage(file: File): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Не удалось прочитать изображение"));
-    };
-    image.src = url;
-  });
-}
-
-async function compressToWebpDataUrl(file: File): Promise<string> {
-  const source = await fileToImage(file);
-  const maxSide = 1920;
-  const scale = Math.min(1, maxSide / Math.max(source.width, source.height));
-  let width = Math.max(1, Math.round(source.width * scale));
-  let height = Math.max(1, Math.round(source.height * scale));
-
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Браузер не поддерживает сжатие фото");
-
-  let dataUrl = "";
-  // Крутим цикл: сначала снижаем качество webp, затем уменьшаем само фото.
-  outer: for (let attempt = 0; attempt < 20; attempt++) {
-    canvas.width = width;
-    canvas.height = height;
-    context.drawImage(source, 0, 0, width, height);
-    for (let quality = 0.85; quality >= 0.4; quality -= 0.12) {
-      dataUrl = canvas.toDataURL("image/webp", quality);
-      if (dataUrl.length <= MAX_IMAGE_LENGTH) break outer;
-    }
-    width = Math.max(1, Math.round(width * 0.8));
-    height = Math.max(1, Math.round(height * 0.8));
-  }
-  if (!dataUrl) throw new Error("Не удалось сжать фото");
-  return dataUrl;
-}
-
-// --- Примитивы редактора ---
-function FieldShell({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label className="text-sm font-medium leading-snug">{label}</Label>
-      {children}
-      {hint && (
-        <p className="text-xs text-muted-foreground/90 leading-relaxed">
-          {hint}
-        </p>
-      )}
-    </div>
-  );
-}
-
+// --- Примитивы редактора (FieldShell и ListInput — в EditorField.tsx) ---
 function StringField({
   value,
   path,

@@ -21,9 +21,12 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { ContentEditor } from "@/components/ContentEditor";
+import { PagesEditor } from "@/components/PagesEditor";
+import { PrivacyEditor } from "@/components/PrivacyEditor";
 import {
   Check,
   EyeOff,
+  Files,
   Home,
   Inbox,
   LayoutTemplate,
@@ -33,6 +36,7 @@ import {
   MessageSquareQuote,
   Navigation,
   RefreshCw,
+  ShieldCheck,
   Star,
   Trash2,
 } from "lucide-react";
@@ -771,6 +775,81 @@ function TabButton({
   );
 }
 
+type SiteView = "home" | "pages" | "privacy";
+
+const SITE_VIEWS: { key: SiteView; label: string; hint: string }[] = [
+  {
+    key: "home",
+    label: "Главная страница",
+    hint: "Тексты секций лендинга, фото первого экрана, поисковая выдача",
+  },
+  {
+    key: "pages",
+    label: "Страницы сайта",
+    hint: "Свои страницы: «Цены», «Акции», «Как мы работаем»",
+  },
+  {
+    key: "privacy",
+    label: "Политика конфиденциальности",
+    hint: "Текст страницы /privacy, на которую ссылается форма заявки",
+  },
+];
+
+/**
+ * Раздел «Сайт» собран из трёх частей: главная, свои страницы и политика.
+ * Раньше здесь был только редактор главной — теперь переключатель сверху.
+ */
+function SiteTab() {
+  const [view, setView] = useState<SiteView>(() => {
+    const saved = localStorage.getItem("admin-site-view");
+    return saved === "pages" || saved === "privacy" ? saved : "home";
+  });
+
+  const switchView = (next: SiteView) => {
+    setView(next);
+    localStorage.setItem("admin-site-view", next);
+  };
+
+  const icon: Record<SiteView, React.ReactNode> = {
+    home: <LayoutTemplate className="h-4 w-4" />,
+    pages: <Files className="h-4 w-4" />,
+    privacy: <ShieldCheck className="h-4 w-4" />,
+  };
+
+  return (
+    <div>
+      <div className="border-b bg-muted/30">
+        <div className="mx-auto max-w-7xl px-6 py-3 flex flex-wrap items-center gap-1.5">
+          {SITE_VIEWS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => switchView(item.key)}
+              title={item.hint}
+              className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold transition-colors ${
+                view === item.key
+                  ? "bg-background text-foreground shadow-sm border border-border"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background/60 border border-transparent"
+              }`}
+            >
+              {icon[item.key]}
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {view === "home" ? (
+        <ContentEditor />
+      ) : view === "pages" ? (
+        <PagesEditor />
+      ) : (
+        <PrivacyEditor />
+      )}
+    </div>
+  );
+}
+
 function AdminWorkspace() {
   const [tab, setTab] = useState<AdminTab>(() => {
     const saved = localStorage.getItem("admin-tab");
@@ -850,7 +929,7 @@ function AdminWorkspace() {
       ) : tab === "reviews" ? (
         <ReviewsBoard />
       ) : (
-        <ContentEditor />
+        <SiteTab />
       )}
     </div>
   );

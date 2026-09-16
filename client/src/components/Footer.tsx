@@ -1,6 +1,7 @@
 import { Sparkles } from "lucide-react";
 import { Link } from "wouter";
 import type { FooterContent } from "@shared/content";
+import { menuPages, pageMenuLabel, pagePath, type SitePage } from "@shared/pages";
 
 /**
  * Ссылка футера: внутренние страницы сайта (/privacy) открываем роутером,
@@ -24,9 +25,17 @@ function FooterLink({ href, label }: { href: string; label: string }) {
   );
 }
 
-export function Footer({ content }: { content: FooterContent }) {
+export function Footer({
+  content,
+  pages = [],
+}: {
+  content: FooterContent;
+  /** Страницы из админки: те, где включена ссылка в меню. */
+  pages?: SitePage[];
+}) {
   const currentYear = new Date().getFullYear();
   const copyright = content.copyrightText.replace(/\{year\}/g, String(currentYear));
+  const navPages = menuPages(pages);
 
   return (
     <footer className="bg-card border-t py-12">
@@ -47,6 +56,16 @@ export function Footer({ content }: { content: FooterContent }) {
               {content.servicesLinks.map((link) => (
                 <li key={`${link.label}-${link.href}`}>
                   <FooterLink href={link.href} label={link.label} />
+                </li>
+              ))}
+              {/* Страницы, созданные в админке: ссылка на каждую из них
+                  есть на всех страницах сайта — так их находит поиск */}
+              {navPages.map((page) => (
+                <li key={page.slug}>
+                  <FooterLink
+                    href={pagePath(page.slug)}
+                    label={pageMenuLabel(page)}
+                  />
                 </li>
               ))}
             </ul>
