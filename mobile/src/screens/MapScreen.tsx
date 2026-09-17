@@ -283,6 +283,8 @@ export function MapScreen({
   const [geo, setGeo] = useState<GeoPlanResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** Сервис карт не ответил — покажем это отдельно от «адрес не найден». */
+  const [unavailable, setUnavailable] = useState(false);
   const [ready, setReady] = useState(false);
   const webRef = useRef<any>(null);
 
@@ -296,7 +298,8 @@ export function MapScreen({
     [signature],
   );
 
-  const load = useCallback(async () => {
+  /** forceRefresh — нажали «Повторить»: сервер не верит даже пометке «не найдено». */
+  const load = useCallback(async (forceRefresh = false) => {
     if (requestStops.length === 0) {
       setGeo({ stops: [], route: null, remaining: 0 });
       setLoading(false);
@@ -304,9 +307,13 @@ export function MapScreen({
     }
     setLoading(true);
     setError(null);
+    setUnavailable(false);
     try {
+      let serviceDown = false;
       for (let round = 0; round < MAX_ROUNDS; round += 1) {
-        const data = await api.geoPlan(token, requestStops);
+        const data = await api.geoPlan(token, requestStops, forceRefresh && round === 0);
+        serviceDown = Boolean(data?.unavailable);
+        setUnavailable(serviceDown);
         setGeo({
           stops: data?.stops ?? [],
           route: data?.route ?? null,
@@ -314,6 +321,9 @@ export function MapScreen({
         });
         // remaining = 0 — сервер разобрал все адреса, линия маршрута готова.
         if (!data?.remaining) break;
+        // Сервис карт не отвечает: долбить его двенадцать раз смысла нет —
+        // показываем карту с тем, что есть, и кнопку «Повторить».
+        if (serviceDown) break;
       }
     } catch (err) {
       setError(
@@ -384,7 +394,20 @@ export function MapScreen({
   }, [ready, payload]);
 
   const foundCount = coordsById.size;
-  const missingCount = stops.length - foundCount;
+  // Не найденные адреса показываем списком: администратор сразу видит, какую
+  // заявку править, вместо «часть адресов не найдена, поищите сами».
+  const missingStops = useMemo(
+    () => stops.filter((stop) => !coordsById.has(stop.id)),
+    [stops, coordsById],
+  );
+  const missingCount = missingStops.length;
+  const missingHint = useMemo(() => {
+    const shown = missingStops
+      .slice(0, 2)
+      .map((stop) => stop.address || "адрес не указан")
+      .join("; ");
+    return missingStops.length > 2 ? `${shown} и ещё ${missingStops.length - 2}` : shown;
+  }, [missingStops]);
 
   const handleNavigate = useCallback(async () => {
     if (!currentStop) return;
@@ -495,15 +518,26 @@ export function MapScreen({
             </View>
           ) : null}
 
-          {!loading && !error && missingCount > 0 ? (
-            <View style={styles.warn}>
-              <Ionicons name="alert-circle-outline" size={14} color="#fbbf24" />
-              <Text style={styles.warnText}>
-                {missingCount === stops.length
-                  ? "Адреса не нашлись на карте — проверьте их в заявках"
-                  : `Не нашли на карте: ${missingCount} ${plural(missingCount, ["адрес", "адреса", "адресов"])}`}
-              </Text>
-            </View>
+          {!loading && !error && (missingCount > 0 || unavailable) ? (
+            <Pressable style={styles.warn} onPress={() => void load(true)}>
+              <Ionicons
+                name={unavailable ? "cloud-offline-outline" : "alert-circle-outline"}
+                size={14}
+                color="#fbbf24"
+              />
+              <View style={styles.warnBody}>
+                <Text style={styles.warnText}>
+                  {unavailable
+                    ? missingCount > 0
+                      ? `Сервис карт не ответил — адреса не проверены: ${missingHint}`
+                      : "Сервис карт не ответил — часть адресов не проверена"
+                    : missingCount === stops.length
+                      ? `Адреса не нашлись на карте: ${missingHint}. Проверьте адрес в заявке`
+                      : `Не нашли на карте: ${missingHint}`}
+                </Text>
+                <Text style={styles.warnAction}>Нажмите, чтобы повторить</Text>
+              </View>
+            </Pressable>
           ) : null}
         </View>
 
@@ -628,7 +662,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(251,191,36,0.35)",
   },
-  warnText: { color: "#fbbf24", fontSize: 12, flex: 1 },
+  warnBody: { flex: 1 },
+  warnText: { color: "#fbbf24", fontSize: 12 },
+  warnAction: { color: "#fbbf24", fontSize: 11, marginTop: 2, textDecorationLine: "underline" },
   footer: {
     flexDirection: "row",
     alignItems: "center",

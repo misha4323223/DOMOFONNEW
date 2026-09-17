@@ -9,10 +9,16 @@
  *   • не чаще одного запроса в секунду — запросы идут через serial();
  *   • приложение представляется в User-Agent;
  *   • результаты обязательно кэшировать — координаты лежат в key/value-таблице
- *     настроек (ключ geo:v1:<хэш адреса>), поэтому повторный адрес не ходит
+ *     настроек (ключ geo:v2:<хэш адреса>), поэтому повторный адрес не ходит
  *     в сеть вообще, а второй телефон админа получает ответ мгновенно.
  *
  * Телефон наружу не ходит: вся работа с внешними сервисами — здесь, на сервере.
+ *
+ * Опыт прода (18.09.2026): адреса заявок пишут клиенты, а не карта — почти
+ * всегда с квартирой («ул. Ленина, д. 5, кв. 12»). Поисковик на такую строку
+ * отвечает «ничего не нашёл», и заявка пропадала с карты. Поэтому адрес перед
+ * поиском чистится от квартиры/подъезда/этажа и ищется несколькими вариантами
+ * (с городом, без номера дома, с областью) — до первого попадания в регион.
  */
 import { createHash } from "crypto";
 import { storage } from "./storage";
@@ -20,8 +26,14 @@ import { storage } from "./storage";
 /** Больше точек в один запрос не берём: карта столько не покажет разумно. */
 export const GEO_MAX_STOPS = 50;
 
-/** Сколько НОВЫХ адресов разрешено искать за один вызов (см. комментарий ниже). */
-export const GEO_MAX_NEW_PER_CALL = 5;
+/**
+ * Сколько запросов к OpenStreetMap разрешено за один вызов.
+ *
+ * Адрес может искаться несколькими вариантами, поэтому считаем не адреса,
+ * а именно запросы: их правило «не чаще 1 раза в секунду» — про запросы.
+ * Не успевшие адреса возвращаются в remaining, приложение вызывает ещё раз.
+ */
+export const GEO_MAX_REQUESTS_PER_CALL = 6;
 
 const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
 const OSRM_ENDPOINT = "https://router.project-osrm.org/route/v1/driving";
@@ -30,6 +42,8 @@ const USER_AGENT = "domofon-obzor71-admin/1.0 (+https://obzor71.ru)";
 const REQUEST_TIMEOUT_MS = 12_000;
 /** Пауза между запросами к внешним сервисам — их правило «не чаще 1 раза в сек». */
 const MIN_REQUEST_INTERVAL_MS = 1100;
+/** Сколько результатов смотреть: первый подходящий может быть и не первым. */
+const NOMINATIM_LIMIT = 5;
 
 /**
  * Регион обслуживания — тот же, что в приложении (mobile/src/city.ts).
@@ -58,10 +72,28 @@ export function isInsideRegion(lat: number, lon: number): boolean {
   );
 }
 
-const CACHE_PREFIX = "geo:v1:";
+/**
+ * v2 — потому что в v1 «не найдено» записывалось по нечищеному адресу
+ * («…, кв. 12»), и такие ложные записи не должны мешать новой логике:
+ * сменив префикс, мы их просто игнорируем.
+ */
+const CACHE_PREFIX = "geo:v2:";
 const ROUTE_CACHE_PREFIX = "route:v1:";
 /** Ограничение на память процесса: адресов у службы немного, но бережёмся. */
 const MEMORY_LIMIT = 4000;
+
+/**
+ * Сколько живёт отметка «адрес не найден» — сутки.
+ *
+ * Раньше она была вечной, и это оказалось ловушкой: один неудачный поиск
+ * (сеть отвалилась, вариант запроса был плохой) — и адрес не находился уже
+ * никогда, сколько ни открывай карту. Сутки — компромисс: одну и ту же
+ * неудачу не гоняем по сто раз на дню, но ошибка сама исправляется к утру.
+ *
+ * Важно: речь только про «не найдено». Исправленный в заявке адрес — это
+ * другой адрес и другой ключ кэша, он ищется сразу же.
+ */
+const NOT_FOUND_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type GeoPrecision = "house" | "street" | "unknown";
 
@@ -105,6 +137,17 @@ export interface GeoPlanResult {
   route: GeoRoute | null;
   /** Сколько адресов ещё не найдено — приложение вызовет эндпоинт повторно. */
   remaining: number;
+  /**
+   * Сервис карт не ответил хотя бы по одному адресу. Это НЕ «адрес не найден»:
+   * приложение говорит «нет связи с сервисом карт» и предлагает повторить,
+   * вместо того чтобы отправлять администратора искать опечатку в заявке.
+   */
+  unavailable: boolean;
+}
+
+/** Сколько запросов к OSM ещё разрешено в этом вызове. */
+interface Budget {
+  left: number;
 }
 
 // --- Очередь запросов ------------------------------------------------------
@@ -133,7 +176,12 @@ function serial<T>(task: () => Promise<T>): Promise<T> {
 
 // --- Кэш ------------------------------------------------------------------
 
-const memory = new Map<string, GeoPoint | null>();
+/**
+ * В памяти процесса держим только НАЙДЕННЫЕ адреса: у «не найдено» есть срок
+ * годности, а его надо проверять по базе. Такой кэш живёт, пока контейнер
+ * тёплый, и экономит самый частый случай — открыли карту второй раз.
+ */
+const memory = new Map<string, GeoPoint>();
 
 function addressKey(query: string): string {
   return createHash("sha1")
@@ -141,35 +189,41 @@ function addressKey(query: string): string {
     .digest("hex");
 }
 
-/** Прочитать кэш. undefined — записи нет; null — адрес уже искали и не нашли. */
+/** Прочитать кэш. undefined — записи нет (надо искать); null — искали, не нашли. */
 async function readCache(key: string): Promise<GeoPoint | null | undefined> {
-  if (memory.has(key)) return memory.get(key);
+  const inMemory = memory.get(key);
+  if (inMemory) return inMemory;
   try {
     const saved = await storage.getSetting(key);
     if (!saved) return undefined;
-    const parsed = JSON.parse(saved.value) as { found?: boolean } & Partial<GeoPoint>;
-    const point: GeoPoint | null = parsed.found
-      ? {
-          lat: Number(parsed.lat),
-          lon: Number(parsed.lon),
-          label: String(parsed.label ?? ""),
-          precision: (parsed.precision as GeoPrecision) ?? "unknown",
-        }
-      : null;
+    const parsed = JSON.parse(saved.value) as { found?: boolean; at?: string } & Partial<GeoPoint>;
+    if (!parsed.found) {
+      const at = Date.parse(parsed.at ?? "");
+      // Неудача ещё свежая — не мучаем OSM теми же адресами.
+      if (!Number.isFinite(at) || Date.now() - at < NOT_FOUND_TTL_MS) return null;
+      return undefined;
+    }
+    const point: GeoPoint = {
+      lat: Number(parsed.lat),
+      lon: Number(parsed.lon),
+      label: String(parsed.label ?? ""),
+      precision: (parsed.precision as GeoPrecision) ?? "unknown",
+    };
     // Записи, сохранённые до появления проверки границ, тоже перечитываем.
-    if (point && !isInsideRegion(point.lat, point.lon)) return null;
+    if (!Number.isFinite(point.lat) || !Number.isFinite(point.lon)) return undefined;
+    if (!isInsideRegion(point.lat, point.lon)) return null;
     if (memory.size < MEMORY_LIMIT) memory.set(key, point);
     return point;
   } catch (err) {
     // База недоступна — не страшно: просто ищем в сети и работаем без кэша.
-    console.error("Кэш координат недоступен:", err);
+    console.error("[geo] Кэш координат недоступен:", err);
     return undefined;
   }
 }
 
-/** Записать кэш (в том числе «не найдено», чтобы не искать адрес заново). */
+/** Записать кэш (в том числе «не найдено», но с датой — см. NOT_FOUND_TTL_MS). */
 async function writeCache(key: string, point: GeoPoint | null): Promise<void> {
-  if (memory.size < MEMORY_LIMIT) memory.set(key, point);
+  if (point && memory.size < MEMORY_LIMIT) memory.set(key, point);
   const value = point
     ? JSON.stringify({
         found: true,
@@ -183,7 +237,7 @@ async function writeCache(key: string, point: GeoPoint | null): Promise<void> {
   try {
     await storage.setSetting(key, value);
   } catch (err) {
-    console.error("Не удалось сохранить координаты в кэш:", err);
+    console.error("[geo] Не удалось сохранить координаты в кэш:", err);
   }
 }
 
@@ -196,7 +250,7 @@ interface NominatimHit {
   address?: { house_number?: string; road?: string; city?: string; town?: string };
 }
 
-/** Разобрать ответ Nominatim. Вынесено отдельно — удобно проверять. */
+/** Разобрать один ответ Nominatim. Вынесено отдельно — удобно проверять. */
 export function parseNominatimHit(hit: NominatimHit | undefined): GeoPoint | null {
   if (!hit) return null;
   const lat = Number(hit.lat);
@@ -217,9 +271,25 @@ export function parseNominatimHit(hit: NominatimHit | undefined): GeoPoint | nul
   };
 }
 
-async function requestGeocode(query: string): Promise<GeoPoint | null> {
+/**
+ * Выбрать из ответа подходящую точку: только внутри нашего региона и,
+ * если есть выбор, то с номером дома. Раньше брали самый первый результат —
+ * и «Ленина 5» уезжало в Златоуст, а верное совпадение стояло вторым.
+ */
+export function pickNominatimHit(hits: NominatimHit[] | undefined): GeoPoint | null {
+  if (!Array.isArray(hits)) return null;
+  const inside = hits
+    .map((hit) => parseNominatimHit(hit))
+    .filter((point): point is GeoPoint => point !== null && isInsideRegion(point.lat, point.lon));
+  if (inside.length === 0) return null;
+  return inside.find((point) => point.precision === "house") ?? inside[0];
+}
+
+async function requestGeocode(query: string, budget: Budget): Promise<NominatimHit[]> {
+  budget.left -= 1;
   const url =
-    `${NOMINATIM_ENDPOINT}?format=jsonv2&limit=1&addressdetails=1&accept-language=ru&q=` +
+    `${NOMINATIM_ENDPOINT}?format=jsonv2&limit=${NOMINATIM_LIMIT}` +
+    `&addressdetails=1&accept-language=ru&q=` +
     encodeURIComponent(query);
   const response = await fetch(url, {
     headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
@@ -229,29 +299,68 @@ async function requestGeocode(query: string): Promise<GeoPoint | null> {
     throw new Error(`Nominatim ${response.status}`);
   }
   const data = (await response.json()) as NominatimHit[];
-  const point = parseNominatimHit(Array.isArray(data) ? data[0] : undefined);
-  if (!point) return null;
-  // Нашлось, но в другом регионе — считаем, что не нашли (см. REGION_BOUNDS).
-  if (!isInsideRegion(point.lat, point.lon)) return null;
-  return point;
+  return Array.isArray(data) ? data : [];
+}
+
+// --- Чистка адреса и варианты запроса --------------------------------------
+
+/**
+ * Убрать из адреса то, чего в карте не бывает: квартиру, подъезд, этаж, офис.
+ * Именно из-за них («ул. Ленина, д. 5, кв. 12») адрес и не находился.
+ * Заодно снимаем пояснения в скобках («вход со двора»), кавычки,
+ * разворачиваем сокращения («мкр.» → «микрорайон») и убираем «г.», «пос.».
+ */
+export function cleanAddressPart(value: string): string {
+  return value
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[«»"']/g, " ")
+    .replace(/(кв|квартира|подъезд|под|офис|этаж|эт|комната|ком|домофон|лифт)\s*\.?\s*\d+[а-я]?/gi, " ")
+    .replace(/(^|[\s,])(г|гор|п|пос|с|д|дер|ст)\.\s*/gi, "$1")
+    .replace(/(^|[\s,])мкр\.?\s*/gi, "$1микрорайон ")
+    .replace(/\s*,\s*,+/g, ",")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,]+|[\s,]+$/g, "")
+    .trim();
+}
+
+/** Адрес без номера дома: «Щёкино, ул. Мира, 1» → «Щёкино, ул. Мира». */
+function withoutHouse(address: string): string {
+  return address
+    .replace(/\b(д|дом)\.?\s*\d+[а-я]?\b/gi, " ")
+    .replace(/\s+\d+[а-я]?\s*$/i, " ")
+    .replace(/\s*,\s*,+/g, ",")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,]+|[\s,]+$/g, "")
+    .trim();
 }
 
 /**
- * Найти координаты по тексту адреса. null — адрес не найден.
- * При сбое сети бросает ошибку: «не нашли» и «не смогли спросить» — разные вещи,
- * и неудачу нельзя записывать в кэш как «адреса нет».
+ * Варианты поискового запроса, от самого точного к самому общему.
+ *
+ * Один и тот же адрес карты понимают по-разному: где-то есть номер дома,
+ * где-то только улица, где-то название микрорайона записано иначе. Поэтому
+ * пробуем по очереди и останавливаемся на первом найденном.
  */
-export async function geocodeAddress(query: string): Promise<GeoPoint | null> {
-  const clean = query.replace(/\s+/g, " ").trim();
-  if (!clean) return null;
+export function addressVariants(address: string, city?: string): string[] {
+  const clean = cleanAddressPart(address);
+  if (!clean) return [];
+  const place = cleanAddressPart(city ?? "");
+  // Город уже внутри адреса («Щёкино, ул. Ленина») — не дублируем его.
+  const hasPlace = Boolean(place) && clean.toLowerCase().includes(place.toLowerCase());
+  const withPlace = hasPlace ? clean : place ? `${place}, ${clean}` : `${SERVICE_REGION}, ${clean}`;
 
-  const key = CACHE_PREFIX + addressKey(clean);
-  const cached = await readCache(key);
-  if (cached !== undefined) return cached;
-
-  const point = await serial(() => requestGeocode(clean));
-  await writeCache(key, point);
-  return point;
+  const candidates = [withPlace, withoutHouse(withPlace), `${clean}, ${SERVICE_REGION}`];
+  const seen = new Set<string>();
+  const variants: string[] = [];
+  for (const candidate of candidates) {
+    const value = candidate.replace(/\s+/g, " ").trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    variants.push(value);
+  }
+  return variants;
 }
 
 // --- OSRM: линия маршрута, километры, время -------------------------------
@@ -294,7 +403,7 @@ export async function buildRoute(
       if (parsed) return parsed;
     }
   } catch (err) {
-    console.error("Кэш маршрута недоступен:", err);
+    console.error("[geo] Кэш маршрута недоступен:", err);
   }
 
   // overview=simplified — линия из десятков точек вместо тысяч: и по сети
@@ -326,7 +435,7 @@ export async function buildRoute(
         }),
       );
     } catch (err) {
-      console.error("Не удалось сохранить маршрут в кэш:", err);
+      console.error("[geo] Не удалось сохранить маршрут в кэш:", err);
     }
   }
   return route;
@@ -334,90 +443,134 @@ export async function buildRoute(
 
 // --- Сборка ответа для приложения -----------------------------------------
 
-/** Запрос к картам: город (если понятен) + адрес + регион для подстраховки. */
-export function buildGeoQuery(address: string, city?: string): string {
-  const street = address.replace(/\s+/g, " ").trim();
-  const place = (city ?? "").replace(/\s+/g, " ").trim();
-  if (!street) return "";
-  const inStreet = place && street.toLowerCase().includes(place.toLowerCase());
-  if (!inStreet) {
-    // Город ставим перед адресом («Богородицк, ул. Ленина 5»), а если города
-    // нет — подставляем регион: иначе поиск уводит в другой регион России.
-    return `${place || SERVICE_REGION}, ${street}`;
-  }
-  // Город уже внутри адреса — добавим регион, только если его там ещё нет.
-  return /тульск/i.test(street) ? street : `${street}, ${SERVICE_REGION}`;
+function emptyStop(id: string): GeoStopResult {
+  return { id, ok: false, lat: null, lon: null, label: "", precision: "unknown" };
+}
+
+function stopFromPoint(id: string, point: GeoPoint | null): GeoStopResult {
+  if (!point) return emptyStop(id);
+  return {
+    id,
+    ok: true,
+    lat: point.lat,
+    lon: point.lon,
+    label: point.label,
+    precision: point.precision,
+  };
 }
 
 /**
  * Превратить список точек маршрута в координаты и линию.
  *
- * Важная тонкость: свежие адреса ищутся по правилам OSM — по одному в секунду,
- * поэтому за один вызов разбираем не больше GEO_MAX_NEW_PER_CALL новых
- * адресов, а в ответе сообщаем, сколько осталось (remaining). Приложение
- * просто вызывает эндпоинт ещё раз: уже найденное берётся из кэша мгновенно,
- * и точки на карте появляются постепенно, а не через полминуты ожидания.
+ * Тонкость первая: свежие адреса ищутся по правилам OSM — не чаще запроса
+ * в секунду, поэтому за один вызов делается не больше GEO_MAX_REQUESTS_PER_CALL
+ * запросов, а в ответе сообщается, сколько осталось (remaining). Приложение
+ * вызывает эндпоинт ещё раз: найденное берётся из кэша мгновенно, и точки
+ * появляются постепенно, а не через полминуты ожидания.
+ *
+ * Тонкость вторая: «адрес не найден» и «сервис не ответил» — разные вещи.
+ * Первое кэшируем (с датой), второе — нет, и говорим приложению честно.
  */
-export async function resolveGeoPlan(input: GeoStopInput[]): Promise<GeoPlanResult> {
+export async function resolveGeoPlan(
+  input: GeoStopInput[],
+  options: { refresh?: boolean } = {},
+): Promise<GeoPlanResult> {
   const stops = input.slice(0, GEO_MAX_STOPS);
+  const budget: Budget = { left: GEO_MAX_REQUESTS_PER_CALL };
   const results: GeoStopResult[] = [];
-  let newLookups = 0;
   let remaining = 0;
+  let lookups = 0;
+  let notFound = 0;
+  let failures = 0;
 
   for (const stop of stops) {
-    const query = buildGeoQuery(stop.address, stop.city);
-    if (!query) {
-      results.push({
-        id: stop.id,
-        ok: false,
-        lat: null,
-        lon: null,
-        label: "",
-        precision: "unknown",
-      });
+    const variants = addressVariants(stop.address, stop.city);
+    if (variants.length === 0) {
+      results.push(emptyStop(stop.id));
       continue;
     }
 
-    const key = CACHE_PREFIX + addressKey(query);
-    // readCache сам кладёт результат в память процесса, повторно её не читаем.
+    // Кэш — по самому точному варианту: найденное (или «не найдено») храним
+    // один раз на адрес, сколько бы вариантов ни пробовали.
+    const key = CACHE_PREFIX + addressKey(variants[0]);
     const cached = await readCache(key);
-    if (cached === undefined && newLookups >= GEO_MAX_NEW_PER_CALL) {
-      // Бюджет новых поисков исчерпан — попросим приложение повторить запрос.
-      remaining += 1;
+    // refresh — это ручное «Повторить»: пометку «не найдено» не уважаем
+    // (за ней может стоять разовая неудача), а найденное берём как обычно.
+    const skipCache = options.refresh === true && cached === null;
+    if (cached !== undefined && !skipCache) {
+      if (cached === null) notFound += 1;
+      results.push(stopFromPoint(stop.id, cached));
       continue;
     }
-    if (cached === undefined) newLookups += 1;
 
-    let point: GeoPoint | null;
-    try {
-      point = await geocodeAddress(query);
-    } catch (err) {
-      console.error("Не удалось найти адрес:", query, err);
-      point = null;
+    if (budget.left <= 0) {
+      // Лимит запросов исчерпан — попросим приложение повторить запрос.
+      remaining += 1;
+      results.push(emptyStop(stop.id));
+      continue;
     }
 
-    results.push({
-      id: stop.id,
-      ok: point !== null,
-      lat: point?.lat ?? null,
-      lon: point?.lon ?? null,
-      label: point?.label ?? "",
-      precision: point?.precision ?? "unknown",
-    });
+    let point: GeoPoint | null = null;
+    let serviceFailed = false;
+    for (const query of variants) {
+      if (budget.left <= 0) break;
+      lookups += 1;
+      try {
+        const hits = await serial(() => requestGeocode(query, budget));
+        point = pickNominatimHit(hits);
+      } catch (err) {
+        // Сеть/сервис — это не «адрес плохой», и в кэш такое не пишем.
+        serviceFailed = true;
+        console.error("[geo] Сервис карт не ответил на запрос:", query, err);
+        break;
+      }
+      if (point) {
+        console.log(
+          `[geo] «${variants[0]}» → ${point.precision === "house" ? "дом" : "улица/район"} (${query})`,
+        );
+        break;
+      }
+    }
+
+    if (!point && serviceFailed) {
+      failures += 1;
+      remaining += 1;
+      results.push(emptyStop(stop.id));
+      continue;
+    }
+    if (!point && budget.left <= 0) {
+      // Не успели перебрать варианты — оставим адрес на следующий вызов.
+      remaining += 1;
+      results.push(emptyStop(stop.id));
+      continue;
+    }
+
+    if (!point) {
+      notFound += 1;
+      console.log(`[geo] «${variants[0]}» → не найдено (пробовали ${variants.length} вариант(а))`);
+    }
+    await writeCache(key, point);
+    results.push(stopFromPoint(stop.id, point));
   }
 
   const found = results.filter(
-    (r): r is GeoStopResult & { lat: number; lon: number } =>
-      r.lat !== null && r.lon !== null,
+    (r): r is GeoStopResult & { lat: number; lon: number } => r.lat !== null && r.lon !== null,
   );
   let route: GeoRoute | null = null;
   if (found.length >= 2 && remaining === 0) {
     try {
       route = await buildRoute(found.map((r) => ({ lat: r.lat, lon: r.lon })));
     } catch (err) {
-      console.error("Не удалось построить маршрут:", err);
+      console.error("[geo] Не удалось построить маршрут:", err);
     }
   }
 
-  return { stops: results, route, remaining };
+  if (lookups > 0) {
+    console.log(
+      `[geo] план: точек ${results.length}, найдено ${found.length}, не найдено ${notFound}, ` +
+        `запросов ${lookups}, недоступно ${failures}`,
+    );
+  }
+
+  return { stops: results, route, remaining, unavailable: failures > 0 };
 }

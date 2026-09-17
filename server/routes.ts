@@ -730,9 +730,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Приложение присылает точки в своём порядке, сервер отвечает координатами
   // и линией маршрута (OpenStreetMap: ключей, кабинетов и счетов не нужно).
   // Свежие адреса ищутся по правилам OSM — не чаще одного раза в секунду,
-  // поэтому за один вызов разбирается не больше GEO_MAX_NEW_PER_CALL новых
-  // адресов, а в ответе приходит remaining: приложение просто зовёт эндпоинт
-  // ещё раз, и точки появляются на карте постепенно.
+  // поэтому за один вызов делается не больше GEO_MAX_REQUESTS_PER_CALL
+  // запросов (адрес может искаться несколькими вариантами), а в ответе
+  // приходит remaining: приложение просто зовёт эндпоинт ещё раз, и точки
+  // появляются на карте постепенно.
   app.post(
     "/api/admin/geo/plan",
     requireAdmin,
@@ -751,8 +752,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (stops.length === 0) {
         return res.status(400).json({ message: "Не передано ни одного адреса" });
       }
+      // refresh — ручное «Повторить» в приложении: заново проверяем адреса,
+      // которые в прошлый раз не нашлись (кэш «не найдено» пропускаем).
+      const refresh = req.body?.refresh === true;
       try {
-        const result = await resolveGeoPlan(stops);
+        const result = await resolveGeoPlan(stops, { refresh });
         return res.json(result);
       } catch (err) {
         console.error("Не удалось определить координаты:", err);

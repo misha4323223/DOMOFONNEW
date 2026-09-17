@@ -279,6 +279,11 @@ export interface GeoPlanResult {
   route: GeoRoute | null;
   /** Сколько адресов ещё не разобрано — тогда запрос надо повторить. */
   remaining: number;
+  /**
+   * Сервис карт не ответил хотя бы по одному адресу. Это не «адрес не найден»:
+   * показываем отдельную подсказку и предлагаем повторить.
+   */
+  unavailable?: boolean;
 }
 
 export const api = {
@@ -429,13 +434,18 @@ export const api = {
    * ответе remaining > 0, запрос нужно повторить. Уже найденное сервер отдаёт
    * из кэша мгновенно, поэтому точки появляются на карте постепенно.
    */
+  /**
+   * Координаты точек маршрута. refresh = true — ручное «Повторить»: сервер
+   * заново проверит адреса, которые в прошлый раз не нашлись.
+   */
   geoPlan: (
     token: string,
     stops: { id: string; address: string; city?: string }[],
+    refresh = false,
   ) =>
     request("/api/admin/geo/plan", {
       method: "POST",
-      body: { stops },
+      body: { stops, refresh },
       token,
     }) as Promise<GeoPlanResult>,
 
