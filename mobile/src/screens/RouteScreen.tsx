@@ -816,6 +816,12 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
             const lead = byId.get(id);
             if (lead) void openRoute(lead);
           }}
+          // «Выполнено» прямо в поездке: тот же путь, что и кнопка в списке
+          // маршрута (с подтверждением списания расходников).
+          onComplete={(id) => {
+            const lead = byId.get(id);
+            if (lead) finishCurrent(lead);
+          }}
         />
       ) : null}
     </SafeAreaView>

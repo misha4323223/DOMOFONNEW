@@ -30,6 +30,7 @@ import {
 } from "react";
 import {
   ActivityIndicator,
+  Linking,
   Modal,
   PermissionsAndroid,
   Platform,
@@ -83,6 +84,12 @@ interface Props {
   onOpenLead: (id: string) => void;
   /** Открыть карты по адресу — когда координаты найти не удалось. */
   onNavigateByAddress: (id: string) => void;
+  /**
+   * Точка отработана: водитель нажал «Выполнено» в поездке. Делает то же,
+   * что кнопка в списке маршрута (с подтверждением расходников), после чего
+   * текущей становится следующая точка — карта уезжает к ней сама.
+   */
+  onComplete: (id: string) => void;
 }
 
 /**
@@ -126,8 +133,10 @@ const MAP_HTML = `<!DOCTYPE html>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function () {
-  var map = null, layer = null, meMarker = null;
+  var map = null, layer = null, meMarker = null, dirLine = null;
   var DATA = { points: [], route: [], focus: null };
+  // ME — где мы сейчас; RIDE — идёт поездка (карта следит за машиной).
+  var ME = null, RIDE = false;
 
   function pinIcon(point) {
     var cls = point.state === 'done' ? 'pin done'
@@ -136,6 +145,64 @@ const MAP_HTML = `<!DOCTYPE html>
       html: '<div class="' + cls + '">' + point.number + '</div>',
       className: '', iconSize: [38, 38], iconAnchor: [19, 19]
     });
+  }
+
+  /** Точка, к которой сейчас едем: помеченная current в приложении. */
+  function currentPoint() {
+    for (var i = 0; i < DATA.points.length; i++) {
+      if (DATA.points[i].state === 'current') return DATA.points[i];
+    }
+    return DATA.points.length ? DATA.points[0] : null;
+  }
+
+  /** Расстояние по прямой между двумя точками, в метрах. */
+  function meters(a, b) {
+    var R = 6371000, rad = Math.PI / 180;
+    var dLat = (b[0] - a[0]) * rad, dLon = (b[1] - a[1]) * rad;
+    var la1 = a[0] * rad, la2 = b[0] * rad;
+    var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  /** Рассказать приложению, где мы и сколько осталось до текущей точки. */
+  function publish() {
+    if (!window.ReactNativeWebView) return;
+    var point = currentPoint();
+    var dist = (ME && point) ? Math.round(meters(ME, [point.lat, point.lon])) : null;
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      type: 'pos',
+      lat: ME ? ME[0] : null,
+      lon: ME ? ME[1] : null,
+      dist: dist,
+      pointNumber: point ? point.number : null,
+      arrived: dist !== null && dist <= 200
+    }));
+  }
+
+  /** Пунктир от машины до точки, куда едем (подсказка направления). */
+  function drawDirection() {
+    if (!map) return;
+    if (dirLine) { map.removeLayer(dirLine); dirLine = null; }
+    var point = currentPoint();
+    if (!RIDE || !ME || !point) return;
+    dirLine = L.polyline([ME, [point.lat, point.lon]], {
+      color: '#38bdf8', weight: 3, opacity: 0.8, dashArray: '8 10'
+    }).addTo(map);
+  }
+
+  function onPosition(ll) {
+    ME = ll;
+    setMe(ll);
+    // В поездке карта сама возвращает машину в кадр, если она уехала за край
+    // (если видно — не мешаем человеку двигать карту руками).
+    if (RIDE) {
+      try {
+        if (!map.getBounds().contains(ll)) map.setView(ll, 16, { animate: true });
+      } catch (e) {}
+      drawDirection();
+    }
+    publish();
   }
 
   function draw() {
@@ -156,7 +223,11 @@ const MAP_HTML = `<!DOCTYPE html>
         .bindPopup('<b>' + p.number + '. ' + p.title + '</b><br/>' + p.subtitle);
     }
 
-    if (DATA.focus !== null && DATA.points[DATA.focus]) {
+    var active = RIDE ? currentPoint() : null;
+    if (active && ME) {
+      // В поездке в кадре сразу и машина, и точка: видно и где мы, и куда ехать.
+      map.fitBounds([ME, [active.lat, active.lon]], { padding: [70, 70], maxZoom: 16 });
+    } else if (DATA.focus !== null && DATA.points[DATA.focus]) {
       var f = DATA.points[DATA.focus];
       map.setView([f.lat, f.lon], Math.max(map.getZoom(), 14), { animate: true });
     } else if (bounds.length === 1) {
@@ -178,36 +249,79 @@ const MAP_HTML = `<!DOCTYPE html>
     }
   }
 
+  // О причинах неудачи с геопозицией рассказываем приложению: человек должен
+  // видеть «запрещён доступ» или «нет сигнала», а не бесконечное «определяю…».
+  var geoReported = '';
+  function reportGeo(status, code) {
+    var key = status + ':' + (code || 0);
+    if (geoReported === key) return;
+    geoReported = key;
+    if (!window.ReactNativeWebView) return;
+    try {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'geo', status: status, code: code || null
+      }));
+    } catch (e) {}
+  }
+
   function watchMe() {
     try {
       navigator.geolocation.watchPosition(function (pos) {
-        setMe([pos.coords.latitude, pos.coords.longitude]);
-      }, function () {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
-    } catch (e) {}
+        reportGeo('ok', null);
+        onPosition([pos.coords.latitude, pos.coords.longitude]);
+      }, function (err) {
+        reportGeo('error', (err && err.code) ? err.code : 0);
+      }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+    } catch (e) {
+      reportGeo('unsupported', null);
+    }
   }
 
   // Разрешение на геопозицию спрашивает приложение, а не карта: пока человек
   // отвечает на системное окно, карта успевает открыться — поэтому при отказе
   // просто пробуем ещё несколько раз, а не молча теряем свою точку.
   function startGeo(attempt) {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) {
+      reportGeo('unsupported', null);
+      return;
+    }
     try {
       navigator.geolocation.getCurrentPosition(function (pos) {
-        setMe([pos.coords.latitude, pos.coords.longitude]);
+        reportGeo('ok', null);
+        onPosition([pos.coords.latitude, pos.coords.longitude]);
         watchMe();
-      }, function () {
+      }, function (err) {
+        reportGeo('error', (err && err.code) ? err.code : 0);
         if (attempt < 5) setTimeout(function () { startGeo(attempt + 1); }, 8000);
       }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
-    } catch (e) {}
+    } catch (e) {
+      reportGeo('unsupported', null);
+    }
   }
 
   window.__setRoute = function (data) {
     DATA = data || DATA;
-    if (map) draw();
+    if (map) { draw(); drawDirection(); }
+    publish();
   };
   window.__recenter = function () {
     DATA.focus = null;
     draw();
+  };
+  // Поездка: карта следит за машиной и показывает, сколько осталось до точки.
+  window.__ride = function (on) {
+    RIDE = !!on;
+    if (!RIDE && dirLine) { map.removeLayer(dirLine); dirLine = null; }
+    if (RIDE && map) {
+      var point = currentPoint();
+      if (ME && point) {
+        map.fitBounds([ME, [point.lat, point.lon]], { padding: [70, 70], maxZoom: 16 });
+      } else if (ME) {
+        map.setView(ME, 16, { animate: true });
+      }
+    }
+    drawDirection();
+    publish();
   };
 
   if (!window.L) {
@@ -234,8 +348,16 @@ const MAP_HTML = `<!DOCTYPE html>
  * Каркас карты — один и тот же объект на каждый рендер.
  * Если передавать новый объект каждый раз, встроенный браузер может посчитать,
  * что страницу просят перезагрузить, и карта будет мигать.
+ *
+ * baseUrl — не косметика, а условие работы геопозиции. Браузер отдаёт
+ * местоположение только защищённому источнику (https), а документ «из строки»
+ * по умолчанию живёт в небезопасном — и тогда navigator.geolocation молча
+ * отказывает с ошибкой «запрещено», сколько ни разрешай доступ приложению.
+ * Поэтому документу выдаём адрес нашего сайта: адрес никуда не запрашивается,
+ * он нужен только как источник.
  */
-const MAP_SOURCE = { html: MAP_HTML };
+const MAP_BASE_URL = "https://obzor71.ru/";
+const MAP_SOURCE = { html: MAP_HTML, baseUrl: MAP_BASE_URL };
 
 function safeJson(value: unknown): string {
   // Ничего лишнего в скрипт не попадёт: кавычки и угловые скобки экранируем.
@@ -279,12 +401,27 @@ export function MapScreen({
   onClose,
   onOpenLead,
   onNavigateByAddress,
+  onComplete,
 }: Props) {
   const [geo, setGeo] = useState<GeoPlanResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   /** Сервис карт не ответил — покажем это отдельно от «адрес не найден». */
   const [unavailable, setUnavailable] = useState(false);
+  /** Идёт поездка: карта следит за машиной и сама ведёт к следующей точке. */
+  const [riding, setRiding] = useState(false);
+  /** Что карта рассказала о нашем положении: сколько осталось до точки. */
+  const [ride, setRide] = useState<{ dist: number | null; arrived: boolean }>({
+    dist: null,
+    arrived: false,
+  });
+  /**
+   * Что случилось с геопозицией: карта рассказывает причину сама.
+   * unsupported — не умеет, denied — доступ запрещён, unavailable — сигнала нет.
+   */
+  const [geoIssue, setGeoIssue] = useState<"unsupported" | "denied" | "unavailable" | null>(
+    null,
+  );
   const [ready, setReady] = useState(false);
   const webRef = useRef<any>(null);
 
@@ -393,6 +530,25 @@ export function MapScreen({
     webRef.current.injectJavaScript(`window.__setRoute(${safeJson(payload)}); true;`);
   }, [ready, payload]);
 
+  // Режим поездки: карта начинает следить за машиной и считать расстояние.
+  useEffect(() => {
+    if (!ready || !webRef.current) return;
+    webRef.current.injectJavaScript(`window.__ride(${riding ? "true" : "false"}); true;`);
+  }, [ready, riding]);
+
+  // Маршрут закончился (все точки выполнены) — поездка закрывается сама.
+  useEffect(() => {
+    if (riding && !currentId) setRiding(false);
+  }, [riding, currentId]);
+
+  // Карта вообще молчит о геопозиции (ни успеха, ни ошибки) — значит, сигнала
+  // нет. Ждём двадцать секунд и говорим это человеку, а не держим «определяю…».
+  useEffect(() => {
+    if (!riding || ride.dist !== null || geoIssue !== null || !currentCoords) return;
+    const timer = setTimeout(() => setGeoIssue("unavailable"), 20_000);
+    return () => clearTimeout(timer);
+  }, [riding, ride.dist, geoIssue, currentCoords]);
+
   const foundCount = coordsById.size;
   // Не найденные адреса показываем списком: администратор сразу видит, какую
   // заявку править, вместо «часть адресов не найдена, поищите сами».
@@ -408,6 +564,62 @@ export function MapScreen({
       .join("; ");
     return missingStops.length > 2 ? `${shown} и ещё ${missingStops.length - 2}` : shown;
   }, [missingStops]);
+
+  /** Карта сама рассказывает, где мы и сколько осталось до текущей точки. */
+  const handleMapMessage = useCallback((event: { nativeEvent: { data: string } }) => {
+    const parsed: unknown = (() => {
+      try {
+        return JSON.parse(event.nativeEvent.data);
+      } catch {
+        return null; // карта может писать что-то своё — просто пропускаем
+      }
+    })();
+    if (!parsed || typeof parsed !== "object") return;
+    const data = parsed as {
+      type?: string;
+      dist?: number | null;
+      arrived?: boolean;
+      status?: string;
+      code?: number | null;
+    };
+    if (data.type === "geo") {
+      // 1 — доступ запрещён, 2 — положение недоступно, 3 — нет сигнала.
+      const code = typeof data.code === "number" ? data.code : 0;
+      setGeoIssue(
+        data.status === "ok"
+          ? null
+          : data.status === "unsupported"
+            ? "unsupported"
+            : code === 1
+              ? "denied"
+              : "unavailable",
+      );
+      return;
+    }
+    if (data.type !== "pos") return;
+    setRide({
+      dist: typeof data.dist === "number" ? data.dist : null,
+      arrived: data.arrived === true,
+    });
+  }, []);
+
+  const startRide = useCallback(() => {
+    setRide({ dist: null, arrived: false });
+    setRiding(true);
+  }, []);
+
+  const stopRide = useCallback(() => setRiding(false), []);
+
+  /**
+   * «Выполнено» в поездке: закрываем текущую заявку тем же путём, что и в
+   * списке маршрута. План пересчитывается, следующая точка становится текущей
+   * — карта уезжает к ней, а поездка продолжается без лишних нажатий.
+   */
+  const completeCurrent = useCallback(() => {
+    if (!currentStop) return;
+    setRide({ dist: null, arrived: false });
+    onComplete(currentStop.id);
+  }, [currentStop, onComplete]);
 
   const handleNavigate = useCallback(async () => {
     if (!currentStop) return;
@@ -434,9 +646,13 @@ export function MapScreen({
         <Text style={styles.headerSubtitle}>
           {loading
             ? `Определяю адреса… ${foundCount} из ${stops.length}`
-            : geo?.route
-              ? `${formatDistance(geo.route.distance)} · ${formatDuration(geo.route.duration)}`
-              : `${stops.length} ${plural(stops.length, ["точка", "точки", "точек"])}`}
+            : riding
+              ? `Поездка · точка ${currentIndex + 1} из ${stops.length}${
+                  ride.dist !== null ? ` · ${formatDistance(ride.dist)}` : ""
+                }`
+              : geo?.route
+                ? `${formatDistance(geo.route.distance)} · ${formatDuration(geo.route.duration)}`
+                : `${stops.length} ${plural(stops.length, ["точка", "точки", "точек"])}`}
         </Text>
       </View>
       <Pressable
@@ -484,11 +700,15 @@ export function MapScreen({
                 geolocationEnabled
                 // По ссылкам внутри карты не ходим (например, на подписи OSM) —
                 // иначе карта уедет на сторонний сайт и вернуться будет нечем.
-                onShouldStartLoadWithRequest={(request: { url: string }) =>
-                  !/^https?:/i.test(request.url)
-                }
+                // Чужие ссылки внутри карты не открываем (уедешь — вернуться
+                // будет нечем), но свой адрес-источник пропускаем всегда.
+                onShouldStartLoadWithRequest={(request: { url: string }) => {
+                  const url = request.url ?? "";
+                  if (url.startsWith(MAP_BASE_URL) || /^(about|data):/i.test(url)) return true;
+                  return !/^https?:/i.test(url);
+                }}
                 onLoadEnd={() => setReady(true)}
-                onMessage={() => undefined}
+                onMessage={handleMapMessage}
                 style={styles.webview}
                 // Карта всегда тёмная: белая вспышка при загрузке бьёт по глазам.
                 containerStyle={styles.webview}
@@ -541,7 +761,97 @@ export function MapScreen({
           ) : null}
         </View>
 
-        {currentStop ? (
+        {!riding && currentStop ? (
+          <Pressable
+            style={({ pressed }) => [styles.startRide, pressed && { opacity: 0.85 }]}
+            onPress={startRide}
+          >
+            <Ionicons name="car-sport" size={18} color={colors.primaryForeground} />
+            <Text style={styles.startRideText}>
+              Начать поездку · точка {currentIndex + 1} из {stops.length}
+            </Text>
+          </Pressable>
+        ) : null}
+
+        {riding && currentStop ? (
+          <View style={styles.ridePanel}>
+            <View style={styles.rideTop}>
+              <View style={[styles.footerNumber, ride.arrived && styles.rideNumberArrived]}>
+                <Text style={styles.footerNumberText}>№{currentIndex + 1}</Text>
+              </View>
+              <View style={styles.footerText}>
+                <Text style={styles.footerAddress} numberOfLines={1}>
+                  {currentStop.address || "адрес не указан"}
+                </Text>
+                <Text
+                  style={[styles.footerMeta, ride.arrived && styles.rideMetaArrived]}
+                  numberOfLines={1}
+                >
+                  {ride.arrived
+                    ? "Вы на месте — отмечайте выполнение"
+                    : ride.dist !== null
+                      ? `осталось ${formatDistance(ride.dist)} по прямой`
+                      : geoIssue === "denied"
+                        ? "приложению запрещён доступ к геопозиции"
+                        : geoIssue === "unsupported"
+                          ? "эта сборка не умеет определять положение"
+                          : geoIssue === "unavailable"
+                            ? "нет сигнала GPS — попробуйте выйти на улицу"
+                            : !currentCoords
+                              ? "координаты не найдены — ведите по адресу"
+                              : "определяю, где мы…"}
+                </Text>
+              </View>
+              <Pressable onPress={stopRide} hitSlop={8} style={styles.rideStop}>
+                <Ionicons name="close" size={18} color={colors.textMuted} />
+              </Pressable>
+            </View>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.rideDone,
+                ride.arrived && styles.rideDoneArrived,
+                pressed && { opacity: 0.85 },
+              ]}
+              onPress={completeCurrent}
+            >
+              <Ionicons name="checkmark-circle" size={20} color={colors.primaryForeground} />
+              <Text style={styles.rideDoneText}>
+                {ride.arrived ? "Выполнено — к следующей" : "Приехал, отметить выполненной"}
+              </Text>
+            </Pressable>
+
+            <View style={styles.rideActions}>
+              <Pressable
+                style={({ pressed }) => [styles.rideAction, pressed && { opacity: 0.8 }]}
+                onPress={() => void handleNavigate()}
+              >
+                <Ionicons name="navigate" size={16} color={colors.text} />
+                <Text style={styles.rideActionText}>Вести в Навигаторе</Text>
+              </Pressable>
+              {geoIssue === "denied" ? (
+                <Pressable
+                  style={({ pressed }) => [styles.rideAction, pressed && { opacity: 0.8 }]}
+                  onPress={() => void Linking.openSettings()}
+                >
+                  <Ionicons name="settings-outline" size={16} color={colors.text} />
+                  <Text style={styles.rideActionText}>Настройки</Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  style={({ pressed }) => [styles.rideAction, pressed && { opacity: 0.8 }]}
+                  onPress={() => {
+                    onClose();
+                    onOpenLead(currentStop.id);
+                  }}
+                >
+                  <Ionicons name="create-outline" size={16} color={colors.text} />
+                  <Text style={styles.rideActionText}>Заявка</Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+        ) : currentStop ? (
           <View style={styles.footer}>
             <View style={styles.footerNumber}>
               <Text style={styles.footerNumberText}>№{currentIndex + 1}</Text>
@@ -665,6 +975,55 @@ const styles = StyleSheet.create({
   warnBody: { flex: 1 },
   warnText: { color: "#fbbf24", fontSize: 12 },
   warnAction: { color: "#fbbf24", fontSize: 11, marginTop: 2, textDecorationLine: "underline" },
+  startRide: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginHorizontal: 12,
+    marginBottom: 12,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+  },
+  startRideText: { color: colors.primaryForeground, fontSize: 15, fontWeight: "700" },
+  ridePanel: {
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 12,
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.cardBorder,
+    backgroundColor: colors.card,
+  },
+  rideTop: { flexDirection: "row", alignItems: "center", gap: 10 },
+  rideNumberArrived: { backgroundColor: "#14532d", borderColor: "#22c55e" },
+  rideMetaArrived: { color: "#86efac", fontWeight: "600" },
+  rideStop: { padding: 4 },
+  rideDone: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+  },
+  rideDoneArrived: { backgroundColor: "#22c55e" },
+  rideDoneText: { color: colors.primaryForeground, fontSize: 15, fontWeight: "700" },
+  rideActions: { flexDirection: "row", gap: 8 },
+  rideAction: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  rideActionText: { color: colors.text, fontSize: 13, fontWeight: "600" },
   footer: {
     flexDirection: "row",
     alignItems: "center",
