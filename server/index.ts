@@ -49,8 +49,19 @@ app.use((req, res, next) => {
 // поисковики и посетители всегда видели один адрес. API (/api/*) не трогаем:
 // на него ходит установленное мобильное приложение, которому адрес менять нельзя.
 app.use((req, res, next) => {
-  const host = (req.headers.host ?? "").toLowerCase();
-  if (host === "www.obzor71.ru" && !req.path.startsWith("/api")) {
+  // Yandex API Gateway подменяет Host на внутренний адрес контейнера, поэтому
+  // исходный домен приходит в заголовках прокси. Смотрим все варианты сразу:
+  // иначе проверка «host === www.obzor71.ru» не срабатывает и www отдаёт
+  // копию сайта вместо редиректа (проверено на проде).
+  const hosts = [
+    req.headers["x-forwarded-host"],
+    req.headers["x-original-host"],
+    req.headers.host,
+  ]
+    .map((value) => (Array.isArray(value) ? value.join(",") : (value ?? "")))
+    .join(",")
+    .toLowerCase();
+  if (hosts.includes("www.obzor71.ru") && !req.path.startsWith("/api")) {
     return res.redirect(301, `https://obzor71.ru${req.originalUrl}`);
   }
   next();
