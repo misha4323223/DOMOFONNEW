@@ -20,6 +20,7 @@ import { ReviewsScreen } from "./src/screens/ReviewsScreen";
 import { ArchiveScreen } from "./src/screens/ArchiveScreen";
 import { AboutScreen } from "./src/screens/AboutScreen";
 import type { Lead, LeadCandidate } from "./src/api";
+import type { WithRepeat } from "./src/repeats";
 import { flushPending } from "./src/sync";
 import { colors } from "./src/theme";
 import { BottomNav, type NavTarget } from "./src/components/BottomNav";
@@ -46,7 +47,7 @@ Notifications.setNotificationHandler({
 
 type Screen =
   | { name: "leads" }
-  | { name: "form"; lead: Lead | null }
+  | { name: "form"; lead: WithRepeat<Lead> | null }
   | { name: "scan" }
   | { name: "review"; candidates: LeadCandidate[]; fullText: string }
   | { name: "content" }

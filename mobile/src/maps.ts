@@ -14,34 +14,13 @@
  */
 import { Linking } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { SERVICE_REGION } from "./city";
 
-/** Города, в которых служба работает постоянно. */
-export const SERVICE_CITIES = ["Богородицк", "Щёкино", "Ефремов"];
-
-/** Регион обслуживания. Подставляется, если города в заявке нет совсем. */
-export const SERVICE_REGION = "Тульская область";
+// Города и разбор города из заявки — в city.ts (без React Native). Здесь они
+// реэкспортируются, чтобы импорты в экранах остались прежними.
+export { SERVICE_CITIES, SERVICE_REGION, findCity, leadCity } from "./city";
 
 const LAST_CITY_KEY = "route_last_city";
-
-/** Привести строку к виду, удобному для поиска: нижний регистр, «ё» → «е». */
-function forSearch(value: string): string {
-  return value.toLowerCase().replace(/ё/g, "е");
-}
-
-/**
- * Найти известный город внутри строки.
- *
- * Сравниваем по корню слова, а не целиком: «Щёкино» → «щекин» — так город
- * находится и в падежах, которыми пишут клиенты («в Щёкине, ул. …»).
- */
-export function findCity(text: string): string | null {
-  const haystack = forSearch(text);
-  for (const city of SERVICE_CITIES) {
-    const root = forSearch(city).slice(0, Math.max(4, city.length - 1));
-    if (haystack.includes(root)) return city;
-  }
-  return null;
-}
 
 /**
  * Собрать поисковый запрос для карт.
@@ -57,24 +36,6 @@ export function buildAddressQuery(address: string, city?: string): string {
   return `${place}, ${street}`;
 }
 
-/**
- * Город заявки, если его можно понять из данных.
- *
- * У заявок, добавленных вручную, вместо имени клиента хранится город — но
- * берём его только если это действительно известный город (в старых заявках
- * там могло оказаться имя). У заявок с сайта город ищем в адресе.
- */
-export function leadCity(lead: {
-  name: string;
-  address: string;
-  source?: string;
-}): string | null {
-  if (lead.source === "admin") {
-    return findCity(lead.name) ?? findCity(lead.address);
-  }
-  return findCity(lead.address);
-}
-
 /** Открыть карты на этом адресе. false — ничего открыть не удалось. */
 export async function openAddressInNavigator(query: string): Promise<boolean> {
   const trimmed = query.trim();
@@ -86,6 +47,37 @@ export async function openAddressInNavigator(query: string): Promise<boolean> {
   const geoUrl = `geo:0,0?q=${encoded}`;
   // Запасной вариант — Яндекс Карты с готовым маршрутом от текущего места.
   const webUrl = `https://yandex.ru/maps/?rtext=~${encoded}&rtt=auto`;
+
+  try {
+    await Linking.openURL(geoUrl);
+    return true;
+  } catch {
+    try {
+      await Linking.openURL(webUrl);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * Открыть карты по координатам.
+ *
+ * Точнее, чем по адресу, и без разговора о городе: клиенты с сайта часто пишут
+ * только улицу, а координаты уже найдены на сервере — некуда ошибиться.
+ */
+export async function openPointInNavigator(
+  lat: number,
+  lon: number,
+  label: string,
+): Promise<boolean> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  const point = `${lat},${lon}`;
+  const name = label.trim().slice(0, 60);
+  // Имя точки в скобках — так её видно на карте, а не только крестик.
+  const geoUrl = `geo:${point}?q=${point}(${encodeURIComponent(name || "Заявка")})`;
+  const webUrl = `https://yandex.ru/maps/?rtext=~${point}&rtt=auto`;
 
   try {
     await Linking.openURL(geoUrl);

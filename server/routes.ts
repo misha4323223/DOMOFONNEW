@@ -21,6 +21,8 @@ import {
   type StockItemPatch,
 } from "./ydb";
 import { recognizeHandwritten } from "./vision";
+import { checkRussianText, SPELLCHECK_MAX_LENGTH } from "./spellcheck";
+import { resolveGeoPlan, type GeoStopInput } from "./geo";
 import { parseCandidates, parseDictation } from "./parse";
 import {
   sanitizeContent,
@@ -327,6 +329,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ message: "Слишком длинная диктовка" });
     }
     return res.json({ text, fields: parseDictation(text) });
+  }));
+
+  // Проверка орфографии текстов сайта и ответов на отзывы. Вызывается только
+  // по явному действию администратора: текст уходит на внешний сервис, поэтому
+  // в заявках и заметках (там адреса и телефоны клиентов) мы её не предлагаем.
+  app.post("/api/admin/spellcheck", requireAdmin, asyncHandler(async (req: Request, res: Response) => {
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    if (!text.trim()) {
+      return res.json({ issues: [] });
+    }
+    if (text.length > SPELLCHECK_MAX_LENGTH) {
+      return res.status(400).json({
+        message: `Текст длиннее ${SPELLCHECK_MAX_LENGTH} символов — проверить нельзя`,
+      });
+    }
+    try {
+      const issues = await checkRussianText(text);
+      return res.json({ issues });
+    } catch (err) {
+      console.error("Проверка орфографии не удалась:", err);
+      return res.status(502).json({
+        message:
+          err instanceof Error && err.name === "TimeoutError"
+            ? "Сервис проверки не ответил, попробуйте позже"
+            : "Не удалось проверить текст (нужен интернет)",
+      });
+    }
   }));
 
   // Публичный контент главной страницы — читает и сайт, и админка-редактор
@@ -696,6 +725,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
     await storage.setSetting(ROUTE_SETTING_KEY, serializeRoutePlan(plan));
     return res.json(plan);
   }));
+
+  // --- Координаты и линия маршрута для карты в приложении ---
+  // Приложение присылает точки в своём порядке, сервер отвечает координатами
+  // и линией маршрута (OpenStreetMap: ключей, кабинетов и счетов не нужно).
+  // Свежие адреса ищутся по правилам OSM — не чаще одного раза в секунду,
+  // поэтому за один вызов разбирается не больше GEO_MAX_NEW_PER_CALL новых
+  // адресов, а в ответе приходит remaining: приложение просто зовёт эндпоинт
+  // ещё раз, и точки появляются на карте постепенно.
+  app.post(
+    "/api/admin/geo/plan",
+    requireAdmin,
+    asyncHandler(async (req: Request, res: Response) => {
+      const raw = Array.isArray(req.body?.stops) ? req.body.stops : [];
+      const stops: GeoStopInput[] = [];
+      for (const item of raw) {
+        const id = typeof item?.id === "string" ? item.id.trim() : "";
+        const address =
+          typeof item?.address === "string" ? item.address.replace(/\s+/g, " ").trim() : "";
+        if (!id || !address) continue;
+        const city =
+          typeof item?.city === "string" ? item.city.replace(/\s+/g, " ").trim() : "";
+        stops.push({ id, address: address.slice(0, 300), city: city.slice(0, 100) });
+      }
+      if (stops.length === 0) {
+        return res.status(400).json({ message: "Не передано ни одного адреса" });
+      }
+      try {
+        const result = await resolveGeoPlan(stops);
+        return res.json(result);
+      } catch (err) {
+        console.error("Не удалось определить координаты:", err);
+        return res.status(502).json({ message: "Сервис карт не ответил, попробуйте позже" });
+      }
+    }),
+  );
 
   // --- Заметки (только мобильное приложение) ---
   // Общие с заявками правила: X-Admin-Token, никакого UI в веб-админке.

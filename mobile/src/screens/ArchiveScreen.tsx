@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -22,6 +22,7 @@ import { EmptyState } from "../components/EmptyState";
 import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 import { callPhone } from "../phone";
+import { analyzeLeads, type ClientGroup } from "../repeats";
 
 interface Props {
   token: string;
@@ -52,6 +53,11 @@ export function ArchiveScreen({ token, onBack }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Раскрытые истории абонентов (ключ — id последней заявки)
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
+
+  // Заявки одного абонента — одной карточкой: телефон или адрес совпали.
+  const groups = useMemo(() => (leads ? analyzeLeads(leads).groups : []), [leads]);
 
   const load = useCallback(
     async (asRefresh = false) => {
@@ -138,80 +144,164 @@ export function ArchiveScreen({ token, onBack }: Props) {
     );
   };
 
-  const renderCard = ({ item }: { item: Lead }) => (
-    <View
-      style={[
-        styles.card,
-        { borderLeftColor: "#22c55e", borderRightColor: "#22c55e" },
-      ]}
-    >
-      <View style={styles.cardHeader}>
-        <Text style={styles.cardName}>{item.name}</Text>
-        <View style={styles.doneBadge}>
-          <Text style={styles.doneBadgeText}>✓ Выполнена</Text>
+  /**
+   * Карточка абонента.
+   *
+   * Заявки одного абонента показываются одной карточкой: так архив не пухнет
+   * от повторных обращений. Показываем последнюю заявку, а остальные прячем
+   * в «Историю» — она раскрывается по тапу, и там у каждого визита свои
+   * кнопки «Вернуть» и «Удалить» (чтобы не удалить не то).
+   */
+  const renderGroup = ({ item }: { item: ClientGroup<Lead> }) => {
+    const lead = item.latest;
+    const several = item.leads.length > 1;
+    const expanded = Boolean(opened[lead.id]);
+
+    return (
+      <View
+        style={[
+          styles.card,
+          { borderLeftColor: "#22c55e", borderRightColor: "#22c55e" },
+        ]}
+      >
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardName}>{lead.name}</Text>
+          {several ? (
+            <View style={styles.repeatBadge}>
+              <Text style={styles.repeatBadgeText}>
+                {item.byAddress && !item.byPhone ? "🏠" : "🔁"} {item.leads.length} заявки
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.doneBadge}>
+              <Text style={styles.doneBadgeText}>✓ Выполнена</Text>
+            </View>
+          )}
         </View>
-      </View>
-      <Text style={styles.cardAddress}>📍 {item.address}</Text>
-      <View style={styles.cardRow}>
-        {/* Номер нажимается: тап — и звонок */}
-        {item.phone ? (
-          <Pressable
-            style={({ pressed }) => [
-              styles.cardPhoneWrap,
-              pressed && { opacity: 0.7 },
-            ]}
-            onPress={() => callPhone(item.phone)}
-            hitSlop={4}
-          >
-            <Text style={styles.cardPhone} numberOfLines={1}>
-              📞 {item.phone}
-            </Text>
-          </Pressable>
-        ) : (
-          <Text style={[styles.cardPhone, styles.cardPhoneMissing]} numberOfLines={1}>
-            📞 Без телефона
-          </Text>
-        )}
-        <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
-      </View>
-      {item.comment ? (
-        <Text style={styles.cardComment}>💬 {item.comment}</Text>
-      ) : null}
-      <View style={styles.cardFooter}>
-        <View style={styles.chip}>
-          <Text style={styles.chipText}>{serviceLabel(item.service)}</Text>
-        </View>
-        {busyId === item.id ? (
-          <ActivityIndicator size="small" color={colors.primary} />
-        ) : (
-          <View style={styles.cardActions}>
+        <Text style={styles.cardAddress}>📍 {lead.address}</Text>
+        <View style={styles.cardRow}>
+          {/* Номер нажимается: тап — и звонок */}
+          {lead.phone ? (
             <Pressable
               style={({ pressed }) => [
-                styles.actionButton,
-                styles.actionRestore,
-                pressed && { opacity: 0.8 },
+                styles.cardPhoneWrap,
+                pressed && { opacity: 0.7 },
               ]}
-              onPress={() => restore(item)}
-              hitSlop={6}
+              onPress={() => callPhone(lead.phone)}
+              hitSlop={4}
             >
-              <Text style={styles.actionRestoreText}>↩ Вернуть</Text>
+              <Text style={styles.cardPhone} numberOfLines={1}>
+                📞 {lead.phone}
+              </Text>
             </Pressable>
+          ) : (
+            <Text style={[styles.cardPhone, styles.cardPhoneMissing]} numberOfLines={1}>
+              📞 Без телефона
+            </Text>
+          )}
+          <Text style={styles.cardDate}>{formatDate(lead.createdAt)}</Text>
+        </View>
+        {lead.comment ? (
+          <Text style={styles.cardComment}>💬 {lead.comment}</Text>
+        ) : null}
+
+        {several ? (
+          <View style={styles.cardFooter}>
+            <View style={styles.chip}>
+              <Text style={styles.chipText}>{serviceLabel(lead.service)}</Text>
+            </View>
             <Pressable
-              style={({ pressed }) => [
-                styles.actionButton,
-                styles.actionDelete,
-                pressed && { opacity: 0.8 },
-              ]}
-              onPress={() => confirmDelete(item)}
+              style={({ pressed }) => [styles.historyButton, pressed && { opacity: 0.8 }]}
+              onPress={() =>
+                setOpened((prev) => ({ ...prev, [lead.id]: !prev[lead.id] }))
+              }
               hitSlop={6}
             >
-              <Text style={styles.actionDeleteText}>Удалить</Text>
+              <Text style={styles.historyButtonText}>
+                {expanded ? "История ▴" : `все заявки: ${item.leads.length} ▾`}
+              </Text>
             </Pressable>
           </View>
+        ) : (
+          <View style={styles.cardFooter}>
+            <View style={styles.chip}>
+              <Text style={styles.chipText}>{serviceLabel(lead.service)}</Text>
+            </View>
+            {busyId === lead.id ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <View style={styles.cardActions}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.actionButton,
+                    styles.actionRestore,
+                    pressed && { opacity: 0.8 },
+                  ]}
+                  onPress={() => restore(lead)}
+                  hitSlop={6}
+                >
+                  <Text style={styles.actionRestoreText}>↩ Вернуть</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.actionButton,
+                    styles.actionDelete,
+                    pressed && { opacity: 0.8 },
+                  ]}
+                  onPress={() => confirmDelete(lead)}
+                  hitSlop={6}
+                >
+                  <Text style={styles.actionDeleteText}>Удалить</Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
         )}
+
+        {/* История визитов: свои кнопки у каждой заявки */}
+        {several && expanded ? (
+          <View style={styles.visits}>
+            {item.leads.map((visit) => (
+              <View key={visit.id} style={styles.visitRow}>
+                <View style={styles.visitText}>
+                  <Text style={styles.visitDate}>{formatDate(visit.createdAt)}</Text>
+                  <Text style={styles.visitService}>{serviceLabel(visit.service)}</Text>
+                </View>
+                {busyId === visit.id ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : (
+                  <View style={styles.cardActions}>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.actionButton,
+                        styles.actionRestore,
+                        pressed && { opacity: 0.8 },
+                      ]}
+                      onPress={() => restore(visit)}
+                      hitSlop={6}
+                    >
+                      <Text style={styles.actionRestoreText}>↩</Text>
+                    </Pressable>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.actionButton,
+                        styles.actionDelete,
+                        pressed && { opacity: 0.8 },
+                      ]}
+                      onPress={() => confirmDelete(visit)}
+                      hitSlop={6}
+                    >
+                      <Text style={styles.actionDeleteText}>✕</Text>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
+            ))}
+          </View>
+        ) : null}
       </View>
-    </View>
-  );
+    );
+  };
 
   return (
     <SafeAreaView style={styles.root}>
@@ -223,7 +313,11 @@ export function ArchiveScreen({ token, onBack }: Props) {
           <View style={styles.headerTitleWrap}>
             <Text style={styles.headerTitle}>Архив</Text>
             <Text style={styles.headerCount}>
-              {leads ? `${leads.length} ${leads.length === 1 ? "заявка" : "заявок"}` : " "}
+              {leads
+                ? `${leads.length} ${leads.length === 1 ? "заявка" : "заявок"}${
+                    groups.length < leads.length ? ` · абонентов: ${groups.length}` : ""
+                  }`
+                : " "}
             </Text>
           </View>
         </View>
@@ -240,9 +334,9 @@ export function ArchiveScreen({ token, onBack }: Props) {
         </View>
       ) : (
         <FlatList
-          data={leads ?? []}
-          keyExtractor={(item) => item.id}
-          renderItem={renderCard}
+          data={groups}
+          keyExtractor={(item) => item.leads.map((lead) => lead.id).join("|")}
+          renderItem={renderGroup}
           contentContainerStyle={styles.list}
           refreshControl={
             <RefreshControl
@@ -312,6 +406,61 @@ const styles = StyleSheet.create({
     padding: 14,
     gap: 10,
     flexGrow: 1,
+  },
+  // Бадж «N заявки» у абонента, который обращался не один раз
+  repeatBadge: {
+    backgroundColor: "rgba(245,162,11,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(245,162,11,0.5)",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  repeatBadgeText: {
+    color: colors.primary,
+    fontSize: 11.5,
+    fontWeight: "800",
+  },
+  // Кнопка раскрытия истории визитов
+  historyButton: {
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 10,
+    backgroundColor: colors.inputBg,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  historyButtonText: {
+    color: colors.text,
+    fontSize: 12.5,
+    fontWeight: "700",
+  },
+  // Список визитов внутри карточки абонента
+  visits: {
+    borderTopWidth: 1,
+    borderTopColor: colors.cardBorder,
+    marginTop: 4,
+    paddingTop: 6,
+    gap: 6,
+  },
+  visitRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  visitText: {
+    flex: 1,
+    gap: 1,
+  },
+  visitDate: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  visitService: {
+    color: colors.textMuted,
+    fontSize: 12,
   },
   card: {
     backgroundColor: colors.card,

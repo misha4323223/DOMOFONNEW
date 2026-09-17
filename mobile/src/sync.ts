@@ -178,6 +178,40 @@ export async function queueLeadUpdate(leadId: string, patch: LeadPatch): Promise
   await enqueue({ kind: "lead:update", leadId, patch });
 }
 
+/**
+ * Добавить к списку с сервера заявки, которые ещё лежат в офлайн-очереди.
+ *
+ * Сервер о них пока не знает — офлайн-очередь уйдёт только тогда, когда
+ * появится интернет. Без этой склейки заявка, занесённая техником у подъезда,
+ * исчезала бы из списка при первом же обновлении (а человек в этот момент решает,
+ * записалась она или нет). Заодно применяем ещё не отправленные правки и удаления.
+ */
+export async function mergePendingLeads(leads: Lead[]): Promise<Lead[]> {
+  const ops = await readQueue();
+  const relevant = ops.filter(
+    (op) =>
+      op.kind === "lead:create" ||
+      op.kind === "lead:update" ||
+      op.kind === "lead:delete",
+  );
+  if (relevant.length === 0) return leads;
+
+  const cached = await getCachedLeads();
+  const byId = new Map(leads.map((lead) => [lead.id, lead]));
+  for (const op of relevant) {
+    if (op.kind === "lead:create") {
+      const local = cached.find((lead) => lead.id === op.clientId);
+      if (local) byId.set(local.id, local);
+    } else if (op.kind === "lead:update") {
+      const current = byId.get(op.leadId);
+      if (current) byId.set(op.leadId, { ...current, ...op.patch });
+    } else {
+      byId.delete(op.leadId);
+    }
+  }
+  return Array.from(byId.values());
+}
+
 /** Создать заявку офлайн (full — заявка с локальным id, status и createdAt). */
 export async function queueLeadCreate(
   clientId: string,

@@ -190,6 +190,50 @@ export function moveStopToCurrent(plan: RoutePlan, leads: Lead[], id: string): s
 }
 
 /**
+ * Можно ли сдвинуть точку на шаг вверх (-1) или вниз (+1).
+ *
+ * Нельзя: сдвинуть выполненную точку, поменять её местами с выполненной,
+ * выйти за пределы списка. По этому правилу приложение гасит стрелки.
+ */
+export function canMoveStop(
+  plan: RoutePlan,
+  leads: Lead[],
+  id: string,
+  direction: -1 | 1,
+): boolean {
+  const index = plan.stops.indexOf(id);
+  if (index === -1) return false;
+  const target = index + direction;
+  if (target < 0 || target >= plan.stops.length) return false;
+  const byId = new Map(leads.map((l) => [l.id, l]));
+  if (byId.get(id)?.status === "done") return false;
+  return byId.get(plan.stops[target])?.status !== "done";
+}
+
+/**
+ * Двинуть точку вверх или вниз по порядку объезда.
+ *
+ * Сортировка по городам и улицам — только подсказка: мастер знает дорогу
+ * лучше, поэтому порядок можно поправить вручную, меняя точку с соседней
+ * стрелками ↑↓. Выполненные точки остаются на своих местах, иначе пройденное
+ * «уехало» бы вниз и текущая точка потерялась бы.
+ */
+export function moveStop(
+  plan: RoutePlan,
+  leads: Lead[],
+  id: string,
+  direction: -1 | 1,
+): string[] {
+  if (!canMoveStop(plan, leads, id, direction)) return plan.stops;
+  const index = plan.stops.indexOf(id);
+  const target = index + direction;
+  const stops = [...plan.stops];
+  stops[index] = stops[target];
+  stops[target] = id;
+  return stops;
+}
+
+/**
  * Добавить заявку в уже начатый маршрут — следующей точкой после текущей.
  *
  * Мастер уже в рейсе, но поступила заявка по пути: она должна встать сразу

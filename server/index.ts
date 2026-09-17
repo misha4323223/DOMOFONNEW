@@ -1,6 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { runDocApiMigration } from "./ydb";
+import { repairStoredSiteContent } from "./content-repair";
 import { log } from "./log";
 import { serveStatic } from "./serve-static";
 
@@ -84,6 +85,11 @@ app.use((req, res, next) => {
       err,
     ),
   );
+
+  // Разовая правка опечаток в текстах, которые однажды сохранили через
+  // админку (база перекрывает значения из кода, иначе их не исправить).
+  // Повторные запуски ничего не меняют — см. server/content-repair.ts.
+  await repairStoredSiteContent();
 
   // Важно: НЕ бросаем err повторно — в Express 4 ошибка из error-middleware
   // больше никем не ловится и уронит весь процесс (контейнер → 502).

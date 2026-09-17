@@ -18,6 +18,7 @@ import {
   type ReviewStatus,
 } from "../api";
 import { EmptyState } from "../components/EmptyState";
+import { SpellCheckPanel } from "../components/SpellCheckPanel";
 import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 
@@ -62,6 +63,8 @@ export function ReviewsScreen({ token, onBack }: Props) {
   const [replyFor, setReplyFor] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState("");
   const [savingReply, setSavingReply] = useState(false);
+  // Открыта ли проверка орфографии для черновика ответа
+  const [spellOpen, setSpellOpen] = useState(false);
 
   const load = useCallback(
     async (asRefresh = false) => {
@@ -235,9 +238,16 @@ export function ReviewsScreen({ token, onBack }: Props) {
               placeholder="Ответ клиенту — появится под отзывом на сайте"
               placeholderTextColor={colors.textMuted}
               multiline
+              spellCheck
               autoFocus
               maxLength={1000}
             />
+            {/* Проверка орфографии: черновик уходит на сервер только по кнопке */}
+            {replyDraft.trim() ? (
+              <Pressable onPress={() => setSpellOpen(true)} hitSlop={6}>
+                <Text style={styles.spellLink}>✓ Проверить орфографию</Text>
+              </Pressable>
+            ) : null}
             <View style={styles.cardActions}>
               <Pressable
                 style={({ pressed }) => [
@@ -401,11 +411,27 @@ export function ReviewsScreen({ token, onBack }: Props) {
           }
         />
       )}
+      {spellOpen ? (
+        <SpellCheckPanel
+          token={token}
+          text={replyDraft}
+          onApply={setReplyDraft}
+          onClose={() => setSpellOpen(false)}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  // Ссылка «Проверить орфографию» под полем ответа
+  spellLink: {
+    alignSelf: "flex-start",
+    color: colors.primary,
+    fontSize: 12.5,
+    fontWeight: "700",
+    paddingVertical: 2,
+  },
   root: {
     flex: 1,
     backgroundColor: colors.background,

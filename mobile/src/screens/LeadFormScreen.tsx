@@ -28,6 +28,7 @@ import {
   getCachedStock,
   isNetworkError,
   isServerError,
+  serviceLabel,
   type Lead,
   type LeadInput,
   type LeadPart,
@@ -40,10 +41,23 @@ import { colors } from "../theme";
 import { CRITICAL_DAYS, STALE_DAYS, staleInfo } from "../leadAge";
 import { useRouteCity } from "../components/CityPicker";
 import { callPhone } from "../phone";
+import { ordinalLabel, type WithRepeat } from "../repeats";
+
+/** Дата в коротком виде: «12.05.2026» — для строки о прошлом обращении. */
+function formatShortDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
 
 interface Props {
   token: string;
-  lead: Lead | null; // null — создание новой заявки
+  /** null — создание новой заявки. У повторной заявки есть история обращений. */
+  lead: WithRepeat<Lead> | null;
   onSaved: () => void;
   onBack: () => void;
 }
@@ -503,6 +517,25 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           })}
         </View>
 
+        {/* Повторное обращение: одна строка, без дополнительных блоков */}
+        {lead?.repeatInfo && lead.repeatInfo.order > 1 ? (
+          <View style={styles.repeatRow}>
+            <Text style={styles.repeatText}>
+              {lead.repeatInfo.byPhone && lead.repeatInfo.byAddress
+                ? "🔁"
+                : lead.repeatInfo.byAddress
+                  ? "🏠"
+                  : "🔁"}{" "}
+              {ordinalLabel(lead.repeatInfo.order)} обращение
+              {lead.repeatInfo.previous
+                ? ` · прошлый раз: ${formatShortDate(lead.repeatInfo.previous.createdAt)} · ${serviceLabel(
+                    lead.repeatInfo.previous.service,
+                  )}`
+                : ""}
+            </Text>
+          </View>
+        ) : null}
+
         <Text style={styles.label}>Адрес</Text>
         <View style={styles.fieldRow}>
           <TextInput
@@ -705,6 +738,14 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             <Text style={styles.buttonText}>Сохранить</Text>
           )}
         </Pressable>
+
+        {/* Пока идёт сохранение, успокаиваем: без связи заявка не потеряется */}
+        {busy ? (
+          <Text style={styles.savingHint}>
+            Сохраняю… Если связи нет, заявка останется в телефоне и отправится
+            сама, как только появится интернет.
+          </Text>
+        ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -821,6 +862,21 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(34,197,94,0.18)",
     borderWidth: 1,
     borderColor: "#22c55e",
+  },
+  // Строка о повторном обращении — надпись без рамки, чтобы форма не пухла
+  repeatRow: {
+    backgroundColor: "rgba(245,162,11,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(245,162,11,0.35)",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  repeatText: {
+    color: colors.primary,
+    fontSize: 12.5,
+    fontWeight: "700",
+    lineHeight: 18,
   },
   // Кнопка «открыть адрес в навигаторе» под полем адреса
   // Кнопка «открыть адрес в навигаторе» под полем адреса — белая, в цвет адреса
@@ -1164,6 +1220,13 @@ const styles = StyleSheet.create({
     color: colors.destructive,
     fontSize: 14,
     marginTop: 8,
+  },
+  savingHint: {
+    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 10,
+    textAlign: "center",
   },
   button: {
     backgroundColor: colors.primary,

@@ -14,6 +14,11 @@
  * В рейсе маршрут можно дополнить: кнопка «+ Добавить точку» открывает список
  * свободных заявок, выбранная встаёт сразу после текущей точки — заехать
  * по пути, не сбивая остальной порядок.
+ *
+ * Порядок можно задать и вручную — стрелками ↑↓ рядом с точкой (и в сборке
+ * маршрута, и в рейсе): точка меняется местами с соседней. Автосортировка
+ * «по городам и улицам» при этом остаётся кнопкой и всегда может вернуть
+ * порядок, если руками получилось неудачно.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -45,12 +50,16 @@ import { EmptyState } from "../components/EmptyState";
 import { ListSkeleton } from "../components/Skeletons";
 import { useRouteCity } from "../components/CityPicker";
 import { callPhone } from "../phone";
+import { leadCity } from "../maps";
+import { MapScreen, isMapAvailable, type MapStop } from "./MapScreen";
 import { colors } from "../theme";
 import {
+  canMoveStop,
   currentStopId,
   groupByCity,
   insertStopAfterCurrent,
   loadLocalRoute,
+  moveStop,
   moveStopToCurrent,
   pushRoutePlan,
   routeProgress,
@@ -86,6 +95,8 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
   // Окно «добавить точку в начатый маршрут» и подтверждение последнего добавления
   const [addOpen, setAddOpen] = useState(false);
   const [lastAdded, setLastAdded] = useState<string | null>(null);
+  // Карта маршрута — отдельный экран поверх приложения
+  const [mapOpen, setMapOpen] = useState(false);
   const { revision } = useSyncState();
 
   const running = plan.startedAt !== null;
@@ -111,6 +122,25 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
   const doneCount = useMemo(
     () => routeProgress({ ...plan, stops }, leads),
     [plan, stops, leads],
+  );
+
+  /**
+   * Точки для карты: адрес, город (он уточняет поиск) и признак «выполнена».
+   * Порядок тот же, что в плане объезда — на карте номера совпадают со списком.
+   */
+  const mapStops = useMemo<MapStop[]>(
+    () =>
+      stops.map((id) => {
+        const lead = byId.get(id);
+        return {
+          id,
+          name: lead?.name ?? "",
+          address: lead?.address ?? "",
+          city: lead ? (leadCity(lead) ?? undefined) : undefined,
+          done: lead?.status === "done",
+        };
+      }),
+    [stops, byId],
   );
 
   const load = useCallback(
@@ -210,6 +240,48 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
       stops.map((id) => byId.get(id)).filter((l): l is Lead => Boolean(l)),
     ).map((l) => l.id);
     void savePlan(touchRoutePlan(ordered, plan.startedAt));
+  };
+
+  /** Сдвинуть точку вверх/вниз: порядок объезда мастер задаёт сам. */
+  const moveStopBy = (id: string, direction: -1 | 1) => {
+    const next = moveStop({ ...plan, stops }, leads, id, direction);
+    if (next === plan.stops) return;
+    void savePlan(touchRoutePlan(next, plan.startedAt));
+  };
+
+  /** Стрелки ↑↓ для точки: вверх/вниз по порядку объезда. */
+  const renderOrderButtons = (id: string) => {
+    const planWithStops = { ...plan, stops };
+    const up = canMoveStop(planWithStops, leads, id, -1);
+    const down = canMoveStop(planWithStops, leads, id, 1);
+    return (
+      <View style={styles.orderButtons}>
+        <Pressable
+          onPress={() => moveStopBy(id, -1)}
+          disabled={!up}
+          hitSlop={8}
+          style={({ pressed }) => [styles.orderButton, pressed && { opacity: 0.6 }]}
+        >
+          <Ionicons
+            name="chevron-up"
+            size={16}
+            color={up ? colors.primary : colors.cardBorder}
+          />
+        </Pressable>
+        <Pressable
+          onPress={() => moveStopBy(id, 1)}
+          disabled={!down}
+          hitSlop={8}
+          style={({ pressed }) => [styles.orderButton, pressed && { opacity: 0.6 }]}
+        >
+          <Ionicons
+            name="chevron-down"
+            size={16}
+            color={down ? colors.primary : colors.cardBorder}
+          />
+        </Pressable>
+      </View>
+    );
   };
 
   /** Закрыть заявку: тот же путь, что и в списке заявок (и в офлайне). */
@@ -398,13 +470,25 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
                   </View>
                 ) : null}
 
-                <Pressable
-                  style={({ pressed }) => [styles.navButton, pressed && { opacity: 0.85 }]}
-                  onPress={() => void openRoute(currentLead)}
-                >
-                  <Ionicons name="navigate" size={17} color={colors.primaryForeground} />
-                  <Text style={styles.navButtonText}>Навигатор</Text>
-                </Pressable>
+                <View style={styles.navRow}>
+                  {/* Кнопка карты — только там, где APK умеет её показать */}
+                  {isMapAvailable ? (
+                    <Pressable
+                      style={({ pressed }) => [styles.mapButton, pressed && { opacity: 0.85 }]}
+                      onPress={() => setMapOpen(true)}
+                    >
+                      <Ionicons name="map" size={17} color={colors.primary} />
+                      <Text style={styles.mapButtonText}>Карта маршрута</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    style={({ pressed }) => [styles.navButton, pressed && { opacity: 0.85 }]}
+                    onPress={() => void openRoute(currentLead)}
+                  >
+                    <Ionicons name="navigate" size={17} color={colors.primaryForeground} />
+                    <Text style={styles.navButtonText}>Навигатор</Text>
+                  </Pressable>
+                </View>
 
                 <View style={styles.actionRow}>
                   <Pressable
@@ -478,6 +562,7 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
                     <View style={[styles.stopNumber, done && styles.stopNumberDone]}>
                       <Text style={styles.stopNumberText}>{done ? "✓" : index + 1}</Text>
                     </View>
+                    {done ? null : renderOrderButtons(id)}
                     <View style={styles.stopText}>
                       <Text
                         style={[styles.stopAddress, done && styles.stopTextDone]}
@@ -541,6 +626,7 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
                           {lead.name} · {serviceLabel(lead.service)}
                         </Text>
                       </View>
+                      {renderOrderButtons(id)}
                       <Pressable
                         onPress={() => toggleStop(lead)}
                         hitSlop={8}
@@ -552,6 +638,16 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
                   );
                 })}
               </View>
+
+              {isMapAvailable ? (
+                <Pressable
+                  style={({ pressed }) => [styles.mapPreviewButton, pressed && { opacity: 0.85 }]}
+                  onPress={() => setMapOpen(true)}
+                >
+                  <Ionicons name="map-outline" size={16} color={colors.primary} />
+                  <Text style={styles.mapPreviewText}>Посмотреть на карте</Text>
+                </Pressable>
+              ) : null}
 
               <Pressable
                 style={({ pressed }) => [styles.startButton, pressed && { opacity: 0.85 }]}
@@ -703,6 +799,25 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
 
       {/* Окно выбора города — если город не понятен из заявки */}
       {picker}
+
+      {/* Карта маршрута: Leaflet и OpenStreetMap во встроенном браузере.
+          Сервер считает координаты и линию проезда — ключей не нужно. */}
+      {mapOpen ? (
+        <MapScreen
+          token={token}
+          stops={mapStops}
+          currentId={currentId}
+          onClose={() => setMapOpen(false)}
+          onOpenLead={(id) => {
+            const lead = byId.get(id);
+            if (lead) onOpenLead(lead);
+          }}
+          onNavigateByAddress={(id) => {
+            const lead = byId.get(id);
+            if (lead) void openRoute(lead);
+          }}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -907,7 +1022,13 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 12.5,
   },
+  navRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 2,
+  },
   navButton: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -915,7 +1036,40 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     borderRadius: 14,
     paddingVertical: 14,
-    marginTop: 2,
+  },
+  mapButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: colors.inputBg,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 14,
+    paddingVertical: 14,
+  },
+  mapButtonText: {
+    color: colors.primary,
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  mapPreviewButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 14,
+    paddingVertical: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    backgroundColor: colors.inputBg,
+  },
+  mapPreviewText: {
+    color: colors.primary,
+    fontSize: 14,
+    fontWeight: "700",
   },
   navButtonText: {
     color: colors.primaryForeground,
@@ -1160,6 +1314,13 @@ const styles = StyleSheet.create({
   },
   removeButton: {
     padding: 4,
+  },
+  orderButtons: {
+    flexDirection: "column",
+    alignItems: "center",
+  },
+  orderButton: {
+    paddingHorizontal: 2,
   },
   pickRow: {
     flexDirection: "row",

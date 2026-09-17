@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
+import { analyzeLeads, ordinalLabel, type VisitInfo, type WithRepeat } from "../repeats";
 import * as Notifications from "expo-notifications";
 import Constants from "expo-constants";
 import {
@@ -32,6 +33,7 @@ import {
 } from "../api";
 import {
   flushPending,
+  mergePendingLeads,
   queueLeadDelete,
   queueLeadUpdate,
   useSyncState,
@@ -111,6 +113,15 @@ async function registerPushToken(token: string) {
   }
 }
 
+/** Склонение: plural(2, ["заявка", "заявки", "заявок"]) → «заявки». */
+function plural(n: number, forms: [string, string, string]): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return forms[0];
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return forms[1];
+  return forms[2];
+}
+
 export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -127,6 +138,10 @@ export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
 
   // Активные заявки — без ушедших в архив (archived === "1")
   const activeLeads = leads.filter((l) => l.archived !== "1");
+
+  // История обращений абонента: считаем из всех заявок (и активных, и архива),
+  // поэтому в карточке сразу видно «повторно», без дополнительных запросов.
+  const repeatIndex = useMemo(() => analyzeLeads(leads).index, [leads]);
 
   // Поиск по заявкам: имя/город, телефон, адрес, услуга, комментарий, заметки
   const [query, setQuery] = useState("");
@@ -201,11 +216,14 @@ export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
           api.leads(token),
           api.notes(token),
         ]);
-        setLeads(data ?? []);
+        // К списку с сервера добавляем заявки, которые ещё лежат в офлайн-очереди:
+        // иначе созданная без интернета заявка на миг пропала бы с экрана.
+        const merged = await mergePendingLeads(data ?? []);
+        setLeads(merged);
         setNotes(notesData ?? []);
         setIsOffline(false);
         // Сохраняем свежие данные в кеш
-        await cacheLeads(data ?? []);
+        await cacheLeads(merged);
         await cacheNotes(notesData ?? []);
         // Связь есть — проталкиваем накопленные офлайн-изменения
         await flushPending(token);
@@ -424,6 +442,9 @@ export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
   };
 
   const renderCard = ({ item }: { item: Lead }) => {
+    const repeatInfo: VisitInfo<Lead> | undefined = repeatIndex.get(item.id);
+    // В форму заявки передаём заявку вместе с историей обращений
+    const forEdit: WithRepeat<Lead> = { ...item, repeatInfo };
     const status = item.status ?? "new";
     // Актуальные (невыполненные) заметки, привязанные к этой заявке
     const leadNotesAll = notesByLead[item.id] ?? [];
@@ -441,7 +462,7 @@ export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
           status === "done" && styles.cardDone,
           pressed && { opacity: 0.8 },
         ]}
-        onPress={() => onEdit(item)}
+        onPress={() => onEdit(forEdit)}
         onLongPress={() => confirmDelete(item)}
         delayLongPress={500}
       >
@@ -453,6 +474,15 @@ export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
                 <Text style={styles.manualBadgeText}>✍️ Вручную</Text>
               </View>
             )}
+            {/* Повторное обращение: бадж живёт в строке с именем и датой, поэтому
+                карточка не становится выше */}
+            {repeatInfo && repeatInfo.order > 1 ? (
+              <View style={styles.repeatBadge}>
+                <Text style={styles.repeatBadgeText}>
+                  {repeatInfo.byPhone ? "🔁" : "🏠"} {ordinalLabel(repeatInfo.order)}
+                </Text>
+              </View>
+            ) : null}
           </View>
           <Text style={styles.cardDate}>{formatDate(item.createdAt)}</Text>
         </View>
@@ -702,10 +732,9 @@ export function LeadsScreen({ token, onEdit, onOpenRoute }: Props) {
       {(isOffline || pendingCount > 0) && (
         <View style={styles.offlineBanner}>
           <Text style={styles.offlineText}>
-            📡 Офлайн-режим
             {pendingCount > 0
-              ? ` · ${pendingCount} измен. ждут отправки`
-              : " · данные могут быть неактуальны"}
+              ? `📡 Сохранено в телефоне: ${pendingCount} ${plural(pendingCount, ["изменение", "изменения", "изменений"])} — отправим, когда появится интернет`
+              : "📡 Офлайн-режим · данные могут быть неактуальны"}
           </Text>
         </View>
       )}
@@ -908,6 +937,20 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   // Метка «Вручную»: заявку добавил админ через «+ Добавить», а не клиент с сайта
+  // Бадж повторного обращения: в строке с именем, высоту карточки не меняет
+  repeatBadge: {
+    backgroundColor: "rgba(245,162,11,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(245,162,11,0.5)",
+    borderRadius: 8,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  repeatBadgeText: {
+    color: colors.primary,
+    fontSize: 11.5,
+    fontWeight: "800",
+  },
   manualBadge: {
     backgroundColor: "rgba(212,212,212,0.12)",
     borderRadius: 7,

@@ -13,6 +13,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, isNetworkError, isServerError } from "../api";
+import { SpellCheckPanel } from "../components/SpellCheckPanel";
 import {
   cloneContent,
   DEFAULT_CONTENT,
@@ -264,6 +265,11 @@ export function ContentScreen({ token, onBack }: Props) {
   const [saving, setSaving] = useState(false);
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Поле, для которого открыта проверка орфографии: текст и куда вернуть правки.
+  const [spellTarget, setSpellTarget] = useState<{
+    text: string;
+    apply: (next: string) => void;
+  } | null>(null);
   // Сколько изменений ждёт отправки (офлайн-очередь)
   const { pending: pendingCount } = useSyncState();
 
@@ -501,8 +507,20 @@ export function ContentScreen({ token, onBack }: Props) {
             onChangeText={(v) => patchSection(section, { [field.key]: v })}
             placeholderTextColor={colors.textMuted}
             multiline={field.multiline}
+            spellCheck
           />
           {field.hint ? <Text style={styles.hint}>{field.hint}</Text> : null}
+          <Pressable
+            hitSlop={6}
+            onPress={() =>
+              setSpellTarget({
+                text: value,
+                apply: (next) => patchSection(section, { [field.key]: next }),
+              })
+            }
+          >
+            <Text style={styles.spellLink}>✓ Проверить орфографию</Text>
+          </Pressable>
         </View>
       );
     }
@@ -572,8 +590,20 @@ export function ContentScreen({ token, onBack }: Props) {
                     onChangeText={(v) => patchListItem(section, field.key, i, { [f.key]: v })}
                     placeholderTextColor={colors.textMuted}
                     multiline={f.multiline}
+                    spellCheck
                   />
                   {f.hint ? <Text style={styles.hint}>{f.hint}</Text> : null}
+                  <Pressable
+                    hitSlop={6}
+                    onPress={() =>
+                      setSpellTarget({
+                        text: String(item[f.key] ?? ""),
+                        apply: (next) => patchListItem(section, field.key, i, { [f.key]: next }),
+                      })
+                    }
+                  >
+                    <Text style={styles.spellLink}>✓ Проверить орфографию</Text>
+                  </Pressable>
                 </View>
               ))}
               {/* Вложенные списки строк (например, пункты списка услуг) */}
@@ -595,6 +625,7 @@ export function ContentScreen({ token, onBack }: Props) {
                             )
                           }
                           placeholderTextColor={colors.textMuted}
+                          spellCheck
                         />
                         <Pressable
                           onPress={() =>
@@ -736,6 +767,16 @@ export function ContentScreen({ token, onBack }: Props) {
         </ScrollView>
       )}
 
+      {/* Проверка орфографии открывается для одного поля и возвращает правки в него */}
+      {spellTarget ? (
+        <SpellCheckPanel
+          token={token}
+          text={spellTarget.text}
+          onApply={spellTarget.apply}
+          onClose={() => setSpellTarget(null)}
+        />
+      ) : null}
+
       <View style={styles.footer}>
         <Pressable
           style={({ pressed }) => [styles.resetButton, pressed && { opacity: 0.8 }]}
@@ -764,6 +805,14 @@ export function ContentScreen({ token, onBack }: Props) {
 }
 
 const styles = StyleSheet.create({
+  // Ссылка «Проверить орфографию» под текстовым полем
+  spellLink: {
+    alignSelf: "flex-start",
+    color: colors.primary,
+    fontSize: 12.5,
+    fontWeight: "700",
+    paddingVertical: 2,
+  },
   root: {
     flex: 1,
     backgroundColor: colors.background,

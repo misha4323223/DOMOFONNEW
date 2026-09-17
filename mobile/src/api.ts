@@ -27,6 +27,20 @@ export async function getCachedLeads(): Promise<Lead[]> {
 
 export type LeadStatus = "new" | "urgent" | "done";
 
+/** Найденная ошибка в тексте: где, что и чем предлагается заменить. */
+export interface SpellIssue {
+  /** Смещение фрагмента в тексте (в символах). */
+  offset: number;
+  /** Длина фрагмента. */
+  length: number;
+  /** Сам фрагмент с ошибкой. */
+  word: string;
+  /** Пояснение сервиса. */
+  message: string;
+  /** Варианты замены, самый вероятный — первым. */
+  suggestions: string[];
+}
+
 /**
  * Расходник, израсходованный на заявке.
  *
@@ -127,6 +141,15 @@ export function serviceLabel(value: string): string {
   return SERVICES.find((s) => s.value === value)?.label ?? value;
 }
 
+/**
+ * Сколько ждём ответа сервера.
+ *
+ * Без таймаута запрос в сети без интернета (Wi-Fi подключён, а связи нет)
+ * висит минутами: кнопка «Сохранить» крутится, техник у подъезда решает,
+ * что приложение сломалось, и заявка теряется.
+ */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 async function request(
   path: string,
   options: { method?: string; body?: unknown; token?: string | null } = {},
@@ -144,11 +167,29 @@ async function request(
     headers["X-Admin-Token"] = options.token;
   }
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: options.method ?? "GET",
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method: options.method ?? "GET",
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    // Оборванный по таймауту запрос приводим к обычной «сетевой» ошибке:
+    // тогда экран кладёт изменение в офлайн-очередь, а не показывает сбой.
+    if (timedOut) throw new TypeError("Сервер не ответил: нет связи");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (res.status === 204) return undefined;
   // 304 Not Modified не должен ронять экраны: без тела возвращать нечего,
@@ -176,26 +217,68 @@ async function request(
 }
 
 /**
- * Ошибка сети (нет интернета и т.п.) — запрос можно безопасно повторить позже.
+ * Ошибка «до сервера не достучались»: нет интернета, таймаут, обрыв связи.
+ *
+ * Признак простой: ответа от сервера мы вообще не получили, то есть у ошибки
+ * нет HTTP-статуса (его ставит request() ниже, когда сервер ответил 4xx/5xx).
  * В React Native fetch обычно падает с TypeError("Network request failed").
+ *
+ * Раньше проверялся только TypeError — и запрос, повисший в сети без
+ * интернета, в эту ветку не попадал: форма показывала «Не удалось сохранить»,
+ * а заявка, занесённая техником у подъезда, терялась. Теперь любое изменение,
+ * которое не доехало до сервера, кладётся в офлайн-очередь и уйдёт само.
  */
 export function isNetworkError(e: unknown): boolean {
   if (e instanceof TypeError) return true;
   if (
     e instanceof Error &&
-    /network request failed|network error|failed to fetch|load failed/i.test(
+    /network request failed|network error|failed to fetch|load failed|abort|timeout|timed out/i.test(
       e.message,
     )
   ) {
     return true;
   }
-  return false;
+  // Ответа от сервера нет вовсе (ни 4xx, ни 5xx) — считаем потерей связи.
+  const status = (e as { status?: unknown } | null)?.status;
+  return typeof status !== "number";
 }
 
 /** Временная ошибка сервера (5xx) — стоит повторить запрос позже. */
 export function isServerError(e: unknown): boolean {
   const status = (e as { status?: unknown } | null)?.status;
   return typeof status === "number" && status >= 500;
+}
+
+// --- Координаты для карты маршрута ---
+// Считает наш сервер через OpenStreetMap: ключей и счетов не нужно.
+
+/** Насколько точно найдена точка: дом / только улица / непонятно. */
+export type GeoPrecision = "house" | "street" | "unknown";
+
+export interface GeoStopResult {
+  id: string;
+  ok: boolean;
+  lat: number | null;
+  lon: number | null;
+  /** Что нашлось: «5, улица Ленина, Щёкино…» — показываем админу. */
+  label: string;
+  precision: GeoPrecision;
+}
+
+/** Линия маршрута: расстояние, время и точки [широта, долгота]. */
+export interface GeoRoute {
+  /** Длина в метрах. */
+  distance: number;
+  /** Время в пути в секундах. */
+  duration: number;
+  geometry: [number, number][];
+}
+
+export interface GeoPlanResult {
+  stops: GeoStopResult[];
+  route: GeoRoute | null;
+  /** Сколько адресов ещё не разобрано — тогда запрос надо повторить. */
+  remaining: number;
 }
 
 export const api = {
@@ -241,6 +324,19 @@ export const api = {
       content: HomeContent;
       updatedAt: string | null;
     }>,
+
+  /**
+   * Проверка орфографии (тексты сайта и ответы на отзывы).
+   *
+   * Вызывается только по кнопке: текст уходит на внешний сервис, поэтому в
+   * заявках и заметках, где бывают адреса и телефоны клиентов, её нет.
+   */
+  checkSpelling: (token: string, text: string) =>
+    request("/api/admin/spellcheck", {
+      method: "POST",
+      body: { text },
+      token,
+    }) as Promise<{ issues: SpellIssue[] }>,
 
   /** Сохранить контент главной страницы из редактора. */
   saveContent: (token: string, content: HomeContent) =>
@@ -324,6 +420,24 @@ export const api = {
       body: plan,
       token,
     }) as Promise<RoutePlan>,
+
+  /**
+   * Координаты точек маршрута и линия проезда — для карты в приложении.
+   *
+   * Адреса ищутся по правилам OpenStreetMap (не чаще одного раза в секунду),
+   * поэтому за один вызов сервер разбирает не все новые адреса сразу: если в
+   * ответе remaining > 0, запрос нужно повторить. Уже найденное сервер отдаёт
+   * из кэша мгновенно, поэтому точки появляются на карте постепенно.
+   */
+  geoPlan: (
+    token: string,
+    stops: { id: string; address: string; city?: string }[],
+  ) =>
+    request("/api/admin/geo/plan", {
+      method: "POST",
+      body: { stops },
+      token,
+    }) as Promise<GeoPlanResult>,
 
   // --- Отзывы клиентов (модерация) ---
 

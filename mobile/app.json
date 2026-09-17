@@ -31,7 +31,8 @@
     "android": {
       "package": "ru.obzor71.admin",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 1,
+      "versionCode": 2,
+      "permissions": ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"],
       "adaptiveIcon": {
         "backgroundColor": "#0a0a0a",
         "foregroundImage": "./assets/android-icon-foreground.png",
