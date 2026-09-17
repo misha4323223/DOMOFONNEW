@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Constants from "expo-constants";
+import * as Updates from "expo-updates";
 import { api } from "../api";
 import { colors } from "../theme";
 
@@ -62,6 +63,13 @@ export function AboutScreen({ onBack }: Props) {
       ? (Constants.expoConfig.runtimeVersion as string)
       : null;
 
+  // Какое OTA-обновление сейчас крутится на телефоне. Нужно, чтобы сразу
+  // видеть, дошло ли новое обновление: у встроенной сборки id нет.
+  const updateId = Updates.isEnabled ? Updates.updateId : null;
+  const updateDate = Updates.createdAt
+    ? Updates.createdAt.toLocaleDateString("ru-RU")
+    : null;
+
   return (
     <SafeAreaView style={styles.root}>
       <View style={styles.header}>
@@ -96,6 +104,14 @@ export function AboutScreen({ onBack }: Props) {
               </Text>
             </View>
           ) : null}
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Обновление</Text>
+            <Text style={styles.infoValue} numberOfLines={1}>
+              {updateId
+                ? `${updateId.slice(0, 8)}${updateDate ? ` · ${updateDate}` : ""}`
+                : "встроенная сборка"}
+            </Text>
+          </View>
           <View style={styles.infoRow}>
             <Text style={styles.infoLabel}>Сайт</Text>
             <Pressable onPress={() => Linking.openURL("https://obzor71.ru")} hitSlop={8}>

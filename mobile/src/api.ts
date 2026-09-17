@@ -67,6 +67,12 @@ export interface LeadInput {
   service: string;
   address: string;
   comment: string | null;
+  /**
+   * Расходники, израсходованные на заявке. Их можно прикрепить сразу при
+   * создании заявки: с остатка они спишутся тогда, когда заявку переведут
+   * в «Выполнена» (делает сервер).
+   */
+  parts?: LeadPart[];
 }
 
 export type LeadPatch = Partial<LeadInput> & {

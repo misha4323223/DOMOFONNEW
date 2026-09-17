@@ -241,23 +241,26 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
     }
   };
 
-  // Подгружаем привязанные заметки и расходники при открытии формы
+  // Подгружаем привязанные заметки и расходники при открытии формы.
+  // Список расходников нужен и для новой заявки: их можно прикрепить сразу,
+  // не сохраняя заявку и не открывая её заново.
   useEffect(() => {
-    if (!lead) return;
     let cancelled = false;
     (async () => {
-      try {
-        const data = await api.notes(token);
-        if (!cancelled) {
-          setLeadNotes(
-            (data ?? []).filter((n) => n.leadId === lead.id),
-          );
-        }
-        await cacheNotes(data ?? []);
-      } catch {
-        const cached = await getCachedNotes();
-        if (!cancelled) {
-          setLeadNotes(cached.filter((n) => n.leadId === lead.id));
+      if (lead) {
+        try {
+          const data = await api.notes(token);
+          if (!cancelled) {
+            setLeadNotes(
+              (data ?? []).filter((n) => n.leadId === lead.id),
+            );
+          }
+          await cacheNotes(data ?? []);
+        } catch {
+          const cached = await getCachedNotes();
+          if (!cancelled) {
+            setLeadNotes(cached.filter((n) => n.leadId === lead.id));
+          }
         }
       }
 
@@ -289,10 +292,13 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
       service,
       address: address.trim(),
       comment: comment.trim() || null,
+      // Расходники уезжают на сервер сразу при создании заявки: списание
+      // произойдёт в момент, когда заявку переведут в «Выполнена».
+      parts,
     };
     try {
       if (lead) {
-        await api.updateLead(token, lead.id, { ...body, status, parts });
+        await api.updateLead(token, lead.id, { ...body, status });
       } else {
         await api.createLead(token, body);
       }
@@ -303,7 +309,7 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
         // когда интернет появится. Расходники спишутся на сервере
         // в момент, когда до него дойдёт перевод заявки в «Выполнена».
         if (lead) {
-          await queueLeadUpdate(lead.id, { ...body, status, parts });
+          await queueLeadUpdate(lead.id, { ...body, status });
         } else {
           const clientId = `local-${Date.now()}-${Math.random()
             .toString(36)
@@ -313,6 +319,9 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             ...body,
             status: "new",
             source: "admin",
+            archived: "0",
+            // Списывает сервер — в момент, когда заявку закроют
+            partsDone: "0",
             createdAt: new Date().toISOString(),
           };
           await queueLeadCreate(clientId, body, full);
@@ -573,94 +582,93 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
           </>
         ) : null}
 
-        {/* Расходники, ушедшие на эту заявку: списываются при выполнении */}
-        {lead ? (
-          <>
-            <Text style={styles.label}>🧰 Израсходовано на заявке</Text>
+        {/* Расходники, ушедшие на эту заявку: списываются при выполнении.
+            Блок есть и у новой заявки — прикрепить расходник можно сразу,
+            не сохраняя заявку и не открывая её потом заново. */}
+        <Text style={styles.label}>🧰 Израсходовано на заявке</Text>
 
-            {parts.length === 0 ? (
-              <Text style={styles.partsHint}>
-                Пока ничего не прикреплено. Добавьте панель, трубку, замок — при
-                сохранении выполненной заявки они спишутся с остатка в машине.
-              </Text>
-            ) : null}
+        {parts.length === 0 ? (
+          <Text style={styles.partsHint}>
+            {lead
+              ? "Пока ничего не прикреплено. Добавьте панель, трубку, замок — при сохранении выполненной заявки они спишутся с остатка в машине."
+              : "Ничего не прикреплено. Если на этой работе уже что-то израсходовали — добавьте позицию сейчас: остаток спишется, когда заявку закроют."}
+          </Text>
+        ) : null}
 
-            {parts.map((p) => {
-              const left = stockQtyOf(p.stockId);
-              const short = left !== null && p.qty > left;
-              return (
-                <View key={p.stockId} style={styles.partRow}>
-                  <View style={styles.partInfo}>
-                    <Text style={styles.partName} numberOfLines={1}>
-                      {p.name}
-                    </Text>
-                    <Text style={[styles.partStock, short && styles.partStockShort]}>
-                      {left === null
-                        ? "нет в расходниках"
-                        : short
-                          ? `в машине только ${formatQty(left)} ${p.unit}`
-                          : `в машине ${formatQty(left)} ${p.unit}`}
-                    </Text>
-                  </View>
-
-                  {/* Количество: − / + и значение (шаг 1) */}
-                  <View style={styles.partStepper}>
-                    <Pressable
-                      style={styles.partStepButton}
-                      onPress={() =>
-                        setPartQty(p.stockId, Math.round((p.qty - 1) * 1000) / 1000)
-                      }
-                      hitSlop={6}
-                    >
-                      <Ionicons name="remove" size={15} color={colors.text} />
-                    </Pressable>
-                    <Text style={styles.partQty}>
-                      {formatQty(p.qty)} {p.unit}
-                    </Text>
-                    <Pressable
-                      style={styles.partStepButton}
-                      onPress={() => setPartQty(p.stockId, p.qty + 1)}
-                      hitSlop={6}
-                    >
-                      <Ionicons name="add" size={15} color={colors.text} />
-                    </Pressable>
-                  </View>
-
-                  <Pressable onPress={() => removePart(p.stockId)} hitSlop={8}>
-                    <Ionicons name="close-circle" size={19} color={colors.textMuted} />
-                  </Pressable>
-                </View>
-              );
-            })}
-
-            <Pressable
-              style={({ pressed }) => [
-                styles.addPartButton,
-                pressed && { opacity: 0.85 },
-              ]}
-              onPress={() => setPartsPicker(true)}
-            >
-              <Ionicons name="add" size={16} color={colors.primary} />
-              <Text style={styles.addPartText}>Добавить расходник</Text>
-            </Pressable>
-
-            {/* Что именно уйдёт с остатка при сохранении */}
-            {status === "done" && parts.length > 0 && lead.partsDone !== "1" ? (
-              <View style={styles.writeOffCard}>
-                <Ionicons name="checkmark-circle" size={16} color="#4ade80" />
-                <Text style={styles.writeOffText}>
-                  При сохранении спишется с остатка:{" "}
-                  {parts.map((p) => `${p.name} ×${formatQty(p.qty)}`).join(", ")}
+        {parts.map((p) => {
+          const left = stockQtyOf(p.stockId);
+          const short = left !== null && p.qty > left;
+          return (
+            <View key={p.stockId} style={styles.partRow}>
+              <View style={styles.partInfo}>
+                <Text style={styles.partName} numberOfLines={1}>
+                  {p.name}
+                </Text>
+                <Text style={[styles.partStock, short && styles.partStockShort]}>
+                  {left === null
+                    ? "нет в расходниках"
+                    : short
+                      ? `в машине только ${formatQty(left)} ${p.unit}`
+                      : `в машине ${formatQty(left)} ${p.unit}`}
                 </Text>
               </View>
-            ) : null}
 
-            {lead.partsDone === "1" ? (
-              <Text style={styles.partsDoneHint}>
-                ✓ Уже списано с остатка. Измените состав — разница учтётся сама.
-              </Text>
-            ) : null}
-          </>
+              {/* Количество: − / + и значение (шаг 1) */}
+              <View style={styles.partStepper}>
+                <Pressable
+                  style={styles.partStepButton}
+                  onPress={() =>
+                    setPartQty(p.stockId, Math.round((p.qty - 1) * 1000) / 1000)
+                  }
+                  hitSlop={6}
+                >
+                  <Ionicons name="remove" size={15} color={colors.text} />
+                </Pressable>
+                <Text style={styles.partQty}>
+                  {formatQty(p.qty)} {p.unit}
+                </Text>
+                <Pressable
+                  style={styles.partStepButton}
+                  onPress={() => setPartQty(p.stockId, p.qty + 1)}
+                  hitSlop={6}
+                >
+                  <Ionicons name="add" size={15} color={colors.text} />
+                </Pressable>
+              </View>
+
+              <Pressable onPress={() => removePart(p.stockId)} hitSlop={8}>
+                <Ionicons name="close-circle" size={19} color={colors.textMuted} />
+              </Pressable>
+            </View>
+          );
+        })}
+
+        <Pressable
+          style={({ pressed }) => [
+            styles.addPartButton,
+            pressed && { opacity: 0.85 },
+          ]}
+          onPress={() => setPartsPicker(true)}
+        >
+          <Ionicons name="add" size={16} color={colors.primary} />
+          <Text style={styles.addPartText}>Добавить расходник</Text>
+        </Pressable>
+
+        {/* Что именно уйдёт с остатка при сохранении */}
+        {status === "done" && parts.length > 0 && lead?.partsDone !== "1" ? (
+          <View style={styles.writeOffCard}>
+            <Ionicons name="checkmark-circle" size={16} color="#4ade80" />
+            <Text style={styles.writeOffText}>
+              При сохранении спишется с остатка:{" "}
+              {parts.map((p) => `${p.name} ×${formatQty(p.qty)}`).join(", ")}
+            </Text>
+          </View>
+        ) : null}
+
+        {lead?.partsDone === "1" ? (
+          <Text style={styles.partsDoneHint}>
+            ✓ Уже списано с остатка. Измените состав — разница учтётся сама.
+          </Text>
         ) : null}
 
         {lead && leadNotes.length > 0 ? (

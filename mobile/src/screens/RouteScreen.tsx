@@ -10,10 +10,15 @@
  * Маршрут хранится на сервере (общий для всех телефонов админов) и в телефоне
  * (чтобы работать без интернета) — см. mobile/src/route.ts. Интерфейса в
  * веб-админке нет: маршрут живёт только в приложении.
+ *
+ * В рейсе маршрут можно дополнить: кнопка «+ Добавить точку» открывает список
+ * свободных заявок, выбранная встаёт сразу после текущей точки — заехать
+ * по пути, не сбивая остальной порядок.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -44,6 +49,7 @@ import { colors } from "../theme";
 import {
   currentStopId,
   groupByCity,
+  insertStopAfterCurrent,
   loadLocalRoute,
   moveStopToCurrent,
   pushRoutePlan,
@@ -77,6 +83,9 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isOffline, setIsOffline] = useState(false);
+  // Окно «добавить точку в начатый маршрут» и подтверждение последнего добавления
+  const [addOpen, setAddOpen] = useState(false);
+  const [lastAdded, setLastAdded] = useState<string | null>(null);
   const { revision } = useSyncState();
 
   const running = plan.startedAt !== null;
@@ -162,6 +171,20 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
     void savePlan(touchRoutePlan(stops, plan.startedAt));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stops, leads, loading]);
+
+  /** Свободные заявки: их можно добавить в уже начатый маршрут. */
+  const addCandidates = useMemo(
+    () => activeLeads.filter((l) => l.status !== "done" && !stops.includes(l.id)),
+    [activeLeads, stops],
+  );
+  const addGroups = useMemo(() => groupByCity(addCandidates), [addCandidates]);
+
+  /** Добавить заявку в рейс: встаёт сразу после текущей точки. */
+  const addStopToRoute = (lead: Lead) => {
+    const next = insertStopAfterCurrent({ ...plan, stops }, leads, lead.id);
+    setLastAdded(lead.address.trim() || lead.name);
+    void savePlan(touchRoutePlan(next, plan.startedAt));
+  };
 
   /** Добавить/убрать заявку: новая точка сразу встаёт на своё место по порядку. */
   const toggleStop = (lead: Lead) => {
@@ -411,7 +434,25 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
                 </Pressable>
               </View>
 
-              <Text style={styles.sectionTitle}>Остальные точки</Text>
+              <View style={styles.sectionHead}>
+                <Text style={[styles.sectionTitle, styles.sectionTitleRow]}>
+                  Остальные точки
+                </Text>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.addStopButton,
+                    pressed && { opacity: 0.8 },
+                  ]}
+                  onPress={() => {
+                    setLastAdded(null);
+                    setAddOpen(true);
+                  }}
+                  hitSlop={6}
+                >
+                  <Ionicons name="add" size={15} color={colors.primary} />
+                  <Text style={styles.addStopText}>Добавить точку</Text>
+                </Pressable>
+              </View>
               {stops.map((id, index) => {
                 const lead = byId.get(id);
                 if (!lead) return null;
@@ -578,6 +619,87 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
           ) : null}
         </ScrollView>
       )}
+
+      {/* Добавление точки в уже начатый маршрут */}
+      <Modal
+        visible={addOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setAddOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Добавить точку</Text>
+            <Text style={styles.modalHint}>
+              Новая точка встанет сразу после текущей — заедете по пути, не
+              сбивая остальной порядок.
+            </Text>
+
+            {lastAdded ? (
+              <View style={styles.addedBanner}>
+                <Ionicons name="checkmark-circle" size={15} color="#4ade80" />
+                <Text style={styles.addedText} numberOfLines={2}>
+                  {lastAdded} — следующая точка
+                </Text>
+              </View>
+            ) : null}
+
+            {addCandidates.length === 0 ? (
+              <Text style={styles.modalEmpty}>
+                Свободных заявок нет: все либо уже в маршруте, либо выполнены.
+              </Text>
+            ) : (
+              <ScrollView
+                style={styles.modalBody}
+                keyboardShouldPersistTaps="handled"
+              >
+                {addGroups.map((group) => (
+                  <View key={group.city}>
+                    <Text style={styles.cityTitle}>{group.city}</Text>
+                    {group.leads.map((lead) => (
+                      <Pressable
+                        key={lead.id}
+                        style={({ pressed }) => [
+                          styles.pickRow,
+                          pressed && { opacity: 0.8 },
+                        ]}
+                        onPress={() => addStopToRoute(lead)}
+                      >
+                        <Ionicons
+                          name="add-circle-outline"
+                          size={21}
+                          color={colors.primary}
+                        />
+                        <View style={styles.stopText}>
+                          <Text style={styles.stopAddress} numberOfLines={1}>
+                            {lead.address || "адрес не указан"}
+                          </Text>
+                          <Text style={styles.stopMeta} numberOfLines={1}>
+                            {lead.name} · {serviceLabel(lead.service)}
+                          </Text>
+                        </View>
+                        {lead.status === "urgent" ? (
+                          <Text style={styles.urgentMark}>🔥</Text>
+                        ) : null}
+                      </Pressable>
+                    ))}
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.modalButton,
+                pressed && { opacity: 0.85 },
+              ]}
+              onPress={() => setAddOpen(false)}
+            >
+              <Text style={styles.modalButtonText}>Готово</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       {/* Окно выбора города — если город не понятен из заявки */}
       {picker}
@@ -840,6 +962,100 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "800",
     marginTop: 8,
+  },
+  // Заголовок раздела рядом с кнопкой действия
+  sectionHead: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 8,
+    gap: 10,
+  },
+  sectionTitleRow: {
+    marginTop: 0,
+    flexShrink: 1,
+  },
+  // Кнопка «+ Добавить точку» в рейсе
+  addStopButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(245,162,11,0.5)",
+    backgroundColor: "rgba(245,162,11,0.12)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  addStopText: {
+    color: colors.primary,
+    fontSize: 12.5,
+    fontWeight: "700",
+  },
+  // Окно добавления точки
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  modalCard: {
+    width: "100%",
+    maxHeight: "86%",
+    backgroundColor: colors.card,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    padding: 16,
+    gap: 10,
+  },
+  modalTitle: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  modalHint: {
+    color: colors.textMuted,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  modalBody: {
+    flexGrow: 0,
+  },
+  modalEmpty: {
+    color: colors.textMuted,
+    fontSize: 13.5,
+    lineHeight: 19,
+  },
+  modalButton: {
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+    paddingVertical: 13,
+    alignItems: "center",
+  },
+  modalButtonText: {
+    color: colors.primaryForeground,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  // Подтверждение: точка добавлена и станет следующей
+  addedBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(34,197,94,0.4)",
+    backgroundColor: "rgba(34,197,94,0.12)",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  addedText: {
+    flex: 1,
+    color: "#4ade80",
+    fontSize: 12.5,
+    fontWeight: "700",
   },
   cityTitle: {
     color: colors.textMuted,

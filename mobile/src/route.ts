@@ -189,6 +189,27 @@ export function moveStopToCurrent(plan: RoutePlan, leads: Lead[], id: string): s
   return rest;
 }
 
+/**
+ * Добавить заявку в уже начатый маршрут — следующей точкой после текущей.
+ *
+ * Мастер уже в рейсе, но поступила заявка по пути: она должна встать сразу
+ * после текущей точки, а не в конец — «закрою эту и заеду по дороге».
+ * Если текущей точки нет (маршрут пройден) — просто в конец.
+ */
+export function insertStopAfterCurrent(
+  plan: RoutePlan,
+  leads: Lead[],
+  id: string,
+): string[] {
+  if (plan.stops.includes(id)) return plan.stops;
+  const current = currentStopId(plan, leads);
+  const index = current ? plan.stops.indexOf(current) : -1;
+  if (index === -1) return [...plan.stops, id];
+  const next = [...plan.stops];
+  next.splice(index + 1, 0, id);
+  return next;
+}
+
 /** Пропустить текущую точку: уходит в конец маршрута. */
 export function skipCurrentStop(plan: RoutePlan, leads: Lead[]): string[] {
   const current = currentStopId(plan, leads);
