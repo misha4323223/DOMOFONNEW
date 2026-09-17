@@ -45,14 +45,18 @@ app.use((req, res, next) => {
 });
 
 // Главный адрес сайта — https://obzor71.ru (без www). Страницы, открытые по
-// www.obzor71.ru, отдаём постоянным редиректом 301 на основной домен, чтобы
-// поисковики и посетители всегда видели один адрес. API (/api/*) не трогаем:
-// на него ходит установленное мобильное приложение, которому адрес менять нельзя.
+// www.obzor71.ru, должны уходить постоянным редиректом 301 на основной домен,
+// чтобы поисковики и посетители всегда видели один адрес. API (/api/*) не
+// трогаем: на него ходит установленное мобильное приложение.
+//
+// ВАЖНО (проверено на проде, сентябрь 2026): до контейнера исходный домен НЕ
+// доходит. Yandex ALB и API Gateway передают в Host внутренний адрес контейнера
+// (bbam40spnjv4cplmmjlv.containers.yandexcloud.net), а X-Forwarded-Host и
+// X-Original-Host не приходят вовсе. Поэтому эта проверка сейчас не срабатывает
+// — редирект надо настраивать в ALB (виртуальный хост www.obzor71.ru →
+// redirect на obzor71.ru). Заголовки-кандидаты оставлены на случай, если
+// маршрут начнёт их пробрасывать.
 app.use((req, res, next) => {
-  // Yandex API Gateway подменяет Host на внутренний адрес контейнера, поэтому
-  // исходный домен приходит в заголовках прокси. Смотрим все варианты сразу:
-  // иначе проверка «host === www.obzor71.ru» не срабатывает и www отдаёт
-  // копию сайта вместо редиректа (проверено на проде).
   const hosts = [
     req.headers["x-forwarded-host"],
     req.headers["x-original-host"],
@@ -61,7 +65,6 @@ app.use((req, res, next) => {
     .map((value) => (Array.isArray(value) ? value.join(",") : (value ?? "")))
     .join(",")
     .toLowerCase();
-  res.setHeader("x-origin-host", hosts || "(empty)");
   if (hosts.includes("www.obzor71.ru") && !req.path.startsWith("/api")) {
     return res.redirect(301, `https://obzor71.ru${req.originalUrl}`);
   }
