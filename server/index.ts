@@ -61,6 +61,7 @@ app.use((req, res, next) => {
     .map((value) => (Array.isArray(value) ? value.join(",") : (value ?? "")))
     .join(",")
     .toLowerCase();
+  res.setHeader("x-origin-host", hosts || "(empty)");
   if (hosts.includes("www.obzor71.ru") && !req.path.startsWith("/api")) {
     return res.redirect(301, `https://obzor71.ru${req.originalUrl}`);
   }
