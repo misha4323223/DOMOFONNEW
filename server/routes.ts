@@ -22,7 +22,7 @@ import {
 } from "./ydb";
 import { recognizeHandwritten } from "./vision";
 import { checkRussianText, SPELLCHECK_MAX_LENGTH } from "./spellcheck";
-import { resolveGeoPlan, type GeoStopInput } from "./geo";
+import { buildRideRoute, resolveGeoPlan, type GeoStopInput } from "./geo";
 import { parseCandidates, parseDictation } from "./parse";
 import {
   sanitizeContent,
@@ -761,6 +761,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (err) {
         console.error("Не удалось определить координаты:", err);
         return res.status(502).json({ message: "Сервис карт не ответил, попробуйте позже" });
+      }
+    }),
+  );
+
+  // --- Дорожный маршрут от машины до оставшихся точек ---
+  // Приложение присылает своё положение и координаты точек в порядке объезда
+  // (их уже посчитал /api/admin/geo/plan), сервер отвечает дорогой, километрами,
+  // временем и участками: «до точки — 3,4 км, 12 мин». Пересчитывается только
+  // при движении — бесплатный маршрутизатор OSM не любит лишних запросов.
+  app.post(
+    "/api/admin/geo/route",
+    requireAdmin,
+    asyncHandler(async (req: Request, res: Response) => {
+      const from = req.body?.from as { lat?: unknown; lon?: unknown } | undefined;
+      const lat = Number(from?.lat);
+      const lon = Number(from?.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        return res.status(400).json({ message: "Не передано положение машины" });
+      }
+
+      const raw = Array.isArray(req.body?.points) ? req.body.points : [];
+      const points: { id: string; lat: number; lon: number }[] = [];
+      for (const item of raw) {
+        const id = typeof item?.id === "string" ? item.id.trim() : "";
+        const pointLat = Number(item?.lat);
+        const pointLon = Number(item?.lon);
+        if (!id || !Number.isFinite(pointLat) || !Number.isFinite(pointLon)) continue;
+        points.push({ id, lat: pointLat, lon: pointLon });
+      }
+      if (points.length === 0) {
+        return res.status(400).json({ message: "Не передано ни одной точки" });
+      }
+
+      try {
+        const route = await buildRideRoute({ lat, lon }, points);
+        if (!route) {
+          return res.status(502).json({ message: "Сервис маршрутов не ответил, попробуйте позже" });
+        }
+        return res.json(route);
+      } catch (err) {
+        console.error("Не удалось построить дорожный маршрут:", err);
+        return res.status(502).json({ message: "Сервис маршрутов не ответил, попробуйте позже" });
       }
     }),
   );

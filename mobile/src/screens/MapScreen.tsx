@@ -41,7 +41,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { api, isNetworkError, type GeoPlanResult } from "../api";
+import { api, isNetworkError, type GeoPlanResult, type GeoRideRoute } from "../api";
 import { openPointInNavigator } from "../maps";
 import { colors } from "../theme";
 
@@ -98,6 +98,14 @@ interface Props {
  * может вернуть не все точки сразу.
  */
 const MAX_ROUNDS = 12;
+
+/**
+ * Когда пересчитывать дорогу от машины: уехали на 400 метров или прошло
+ * полторы минуты. Бесплатный маршрутизатор OSM — не полигон для тысяч
+ * запросов, а для вождения такого шага достаточно.
+ */
+const RIDE_MOVE_METERS = 400;
+const RIDE_MAX_AGE_MS = 90_000;
 
 /** HTML-каркас карты. Данные приходят отдельно — через window.__setRoute. */
 const MAP_HTML = `<!DOCTYPE html>
@@ -185,7 +193,8 @@ const MAP_HTML = `<!DOCTYPE html>
     if (!map) return;
     if (dirLine) { map.removeLayer(dirLine); dirLine = null; }
     var point = currentPoint();
-    if (!RIDE || !ME || !point) return;
+    // Когда есть дорожный маршрут, пунктир по прямой только мешает.
+    if (!RIDE || !ME || !point || DATA.directionHint === false) return;
     dirLine = L.polyline([ME, [point.lat, point.lon]], {
       color: '#38bdf8', weight: 3, opacity: 0.8, dashArray: '8 10'
     }).addTo(map);
@@ -415,6 +424,12 @@ export function MapScreen({
     dist: null,
     arrived: false,
   });
+  /** Где мы сейчас — карта присылает вместе с расстоянием до точки. */
+  const [me, setMe] = useState<{ lat: number; lon: number } | null>(null);
+  /** Дорожный маршрут от машины: линия по дорогам, остаток и время прибытия. */
+  const [road, setRoad] = useState<GeoRideRoute | null>(null);
+  /** Сервис маршрутов не ответил — показываем по прямой и говорим об этом. */
+  const [roadFailed, setRoadFailed] = useState(false);
   /**
    * Что случилось с геопозицией: карта рассказывает причину сама.
    * unsupported — не умеет, denied — доступ запрещён, unavailable — сигнала нет.
@@ -424,6 +439,10 @@ export function MapScreen({
   );
   const [ready, setReady] = useState(false);
   const webRef = useRef<any>(null);
+  /** Откуда считался последний дорожный маршрут — чтобы не пересчитывать зря. */
+  const roadRef = useRef<{ at: number; lat: number; lon: number } | null>(null);
+  /** Номер последнего запроса дороги: ответы на старые не применяем. */
+  const roadReqRef = useRef(0);
 
   // Отпечаток списка точек: меняется адрес или порядок — маршрут пересчитываем.
   const signature = useMemo(
@@ -519,10 +538,77 @@ export function MapScreen({
       .filter((p): p is NonNullable<typeof p> => p !== null);
     return {
       points,
-      route: geo?.route?.geometry ?? [],
+      // В поездке рисуем дорогу от машины; вне поездки — план между точками.
+      route: riding && road ? road.geometry : (geo?.route?.geometry ?? []),
+      // Пунктир по прямой нужен только когда дороги ещё нет.
+      directionHint: !(riding && road),
       focus: currentCoords ? points.findIndex((p) => p.number === currentIndex + 1) : null,
     };
-  }, [stops, coordsById, currentId, geo, currentCoords, currentIndex]);
+  }, [stops, coordsById, currentId, geo, currentCoords, currentIndex, riding, road]);
+
+  /** Оставшиеся точки в порядке объезда: текущая и все следующие за ней. */
+  const aheadStops = useMemo(() => {
+    if (currentIndex < 0) return [];
+    const list: { id: string; lat: number; lon: number }[] = [];
+    for (const stop of stops.slice(currentIndex)) {
+      if (stop.done) continue;
+      const point = coordsById.get(stop.id);
+      if (!point) continue;
+      list.push({ id: stop.id, lat: point.lat, lon: point.lon });
+    }
+    return list;
+  }, [stops, currentIndex, coordsById]);
+
+  // Раз в полминуты пересчитываем срок годности маршрута — чтобы «буду в 14:20»
+  // не врало, если машина стоит в пробке.
+  const [rideTick, setRideTick] = useState(0);
+  useEffect(() => {
+    if (!riding) return;
+    const timer = setInterval(() => setRideTick((value) => value + 1), 30_000);
+    return () => clearInterval(timer);
+  }, [riding]);
+
+  // Отработали точку — дорогу до следующей считаем заново, не дожидаясь движения.
+  useEffect(() => {
+    roadRef.current = null;
+  }, [currentId]);
+
+  /**
+   * Дорожный маршрут от машины до оставшихся точек. Считаем при старте поездки,
+   * после каждой точки и когда машина уехала от места прошлого расчёта.
+   */
+  useEffect(() => {
+    if (!riding || !me || aheadStops.length === 0) return;
+    const last = roadRef.current;
+    if (last) {
+      const moved = metersBetween(last, me);
+      const age = Date.now() - last.at;
+      if (moved < RIDE_MOVE_METERS && age < RIDE_MAX_AGE_MS) return;
+    }
+    roadRef.current = { at: Date.now(), lat: me.lat, lon: me.lon };
+    // Номер запроса: ответ на устаревший (пока ехали) просто не применяем.
+    // Отменять запрос при каждом обновлении позиции нельзя — иначе линия
+    // не появится вообще, пока машина движется.
+    roadReqRef.current += 1;
+    const reqId = roadReqRef.current;
+    void api
+      .rideRoute(token, me, aheadStops)
+      .then((data) => {
+        if (roadReqRef.current !== reqId) return;
+        setRoad(data);
+        setRoadFailed(false);
+      })
+      .catch(() => {
+        // Не получилось — оставляем прежнюю линию и говорим об этом честно.
+        if (roadReqRef.current === reqId) setRoadFailed(true);
+      });
+  }, [riding, me, rideTick, aheadStops, token]);
+
+  /** Участок до текущей точки — из него берём «осталось» и время прибытия. */
+  const currentLeg = useMemo(() => {
+    if (!road || !currentId) return null;
+    return road.legs.find((leg) => leg.id === currentId) ?? null;
+  }, [road, currentId]);
 
   // Обновляем карту без перезагрузки страницы: маршрут перестраивается на месте.
   useEffect(() => {
@@ -577,6 +663,8 @@ export function MapScreen({
     if (!parsed || typeof parsed !== "object") return;
     const data = parsed as {
       type?: string;
+      lat?: number | null;
+      lon?: number | null;
       dist?: number | null;
       arrived?: boolean;
       status?: string;
@@ -597,6 +685,9 @@ export function MapScreen({
       return;
     }
     if (data.type !== "pos") return;
+    if (typeof data.lat === "number" && typeof data.lon === "number") {
+      setMe({ lat: data.lat, lon: data.lon });
+    }
     setRide({
       dist: typeof data.dist === "number" ? data.dist : null,
       arrived: data.arrived === true,
@@ -605,10 +696,16 @@ export function MapScreen({
 
   const startRide = useCallback(() => {
     setRide({ dist: null, arrived: false });
+    roadRef.current = null;
     setRiding(true);
   }, []);
 
-  const stopRide = useCallback(() => setRiding(false), []);
+  const stopRide = useCallback(() => {
+    roadRef.current = null;
+    setRoad(null);
+    setRoadFailed(false);
+    setRiding(false);
+  }, []);
 
   /**
    * «Выполнено» в поездке: закрываем текущую заявку тем же путём, что и в
@@ -648,7 +745,13 @@ export function MapScreen({
             ? `Определяю адреса… ${foundCount} из ${stops.length}`
             : riding
               ? `Поездка · точка ${currentIndex + 1} из ${stops.length}${
-                  ride.dist !== null ? ` · ${formatDistance(ride.dist)}` : ""
+                  currentLeg
+                    ? ` · ${formatDistance(currentLeg.distance)} · буду ~${formatClock(
+                        currentLeg.duration,
+                      )}`
+                    : ride.dist !== null
+                      ? ` · ${formatDistance(ride.dist)}`
+                      : ""
                 }`
               : geo?.route
                 ? `${formatDistance(geo.route.distance)} · ${formatDuration(geo.route.duration)}`
@@ -789,9 +892,13 @@ export function MapScreen({
                 >
                   {ride.arrived
                     ? "Вы на месте — отмечайте выполнение"
-                    : ride.dist !== null
-                      ? `осталось ${formatDistance(ride.dist)} по прямой`
-                      : geoIssue === "denied"
+                    : currentLeg
+                      ? `до точки ${formatDistance(currentLeg.distance)} · ${formatDuration(
+                          currentLeg.duration,
+                        )} · буду ~${formatClock(currentLeg.duration)}`
+                      : ride.dist !== null
+                        ? `осталось ${formatDistance(ride.dist)} по прямой`
+                        : geoIssue === "denied"
                         ? "приложению запрещён доступ к геопозиции"
                         : geoIssue === "unsupported"
                           ? "эта сборка не умеет определять положение"
@@ -806,6 +913,17 @@ export function MapScreen({
                 <Ionicons name="close" size={18} color={colors.textMuted} />
               </Pressable>
             </View>
+
+            {road ? (
+              <Text style={styles.rideTotal}>
+                Весь остаток: {formatDistance(road.distance)} · {formatDuration(road.duration)} ·
+                закончу около {formatClock(road.duration)}
+              </Text>
+            ) : roadFailed ? (
+              <Text style={styles.rideTotal}>
+                Дорогу показать не удалось — сервис маршрутов не ответил, показываю по прямой
+              </Text>
+            ) : null}
 
             <Pressable
               style={({ pressed }) => [
@@ -896,6 +1014,30 @@ export function MapScreen({
       </SafeAreaView>
     </Modal>
   );
+}
+
+/** Расстояние по прямой между двумя точками, в метрах. */
+function metersBetween(
+  a: { lat: number; lon: number },
+  b: { lat: number; lon: number },
+): number {
+  const R = 6371000;
+  const rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad;
+  const dLon = (b.lon - a.lon) * rad;
+  const la1 = a.lat * rad;
+  const la2 = b.lat * rad;
+  const h =
+    Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+/** «~14:20» — во сколько будем на месте через столько секунд. */
+function formatClock(secondsFromNow: number): string {
+  const at = new Date(Date.now() + secondsFromNow * 1000);
+  const hours = at.getHours().toString().padStart(2, "0");
+  const minutes = at.getMinutes().toString().padStart(2, "0");
+  return `${hours}:${minutes}`;
 }
 
 /** «42 км» или «600 м» — как в навигаторе. */
@@ -1009,6 +1151,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: colors.primary,
   },
+  rideTotal: { color: colors.textMuted, fontSize: 12 },
   rideDoneArrived: { backgroundColor: "#22c55e" },
   rideDoneText: { color: colors.primaryForeground, fontSize: 15, fontWeight: "700" },
   rideActions: { flexDirection: "row", gap: 8 },

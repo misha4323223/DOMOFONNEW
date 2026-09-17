@@ -365,12 +365,18 @@ export function addressVariants(address: string, city?: string): string[] {
 
 // --- OSRM: линия маршрута, километры, время -------------------------------
 
+interface OsrmLeg {
+  distance?: number;
+  duration?: number;
+}
+
 interface OsrmResponse {
   code?: string;
   routes?: {
     distance?: number;
     duration?: number;
     geometry?: { coordinates?: [number, number][] };
+    legs?: OsrmLeg[];
   }[];
 }
 
@@ -437,6 +443,115 @@ export async function buildRoute(
     } catch (err) {
       console.error("[geo] Не удалось сохранить маршрут в кэш:", err);
     }
+  }
+  return route;
+}
+
+// --- «Живой» маршрут: от машины до оставшихся точек -------------------------
+//
+// Это то, что видит водитель в поездке: не весь план целиком, а дорога
+// впереди — от текущего положения до следующей точки и дальше по порядку.
+// Пересчитываем не на каждый метр, а по движению (см. GEO_RIDE_MOVE_METERS
+// в приложении): бесплатный маршрутизатор OSM — не полигон для тысяч запросов.
+
+export interface GeoRideLeg {
+  /** К какой точке ведёт этот участок. */
+  id: string;
+  distance: number;
+  duration: number;
+}
+
+export interface GeoRideRoute {
+  distance: number;
+  duration: number;
+  geometry: [number, number][];
+  /** Расстояние и время по каждому участку — для «до точки 3, 12 мин». */
+  legs: GeoRideLeg[];
+}
+
+/** Дальше двадцати точек URL уже неприлично длинный, да и карта не читается. */
+export const GEO_MAX_RIDE_POINTS = 20;
+
+const RIDE_ROUTE_PREFIX = "route:live:";
+/** Сколько живёт расчёт: дорога с точностью до ста метров не меняется часами. */
+const RIDE_ROUTE_TTL_MS = 2 * 60 * 60 * 1000;
+
+/** Разобрать участки маршрута; количество должно совпасть с числом точек. */
+export function parseOsrmLegs(data: OsrmResponse | undefined, ids: string[]): GeoRideLeg[] {
+  const legs = data?.routes?.[0]?.legs ?? [];
+  if (legs.length !== ids.length) return [];
+  const result: GeoRideLeg[] = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    const distance = Number(legs[i]?.distance);
+    const duration = Number(legs[i]?.duration);
+    if (!Number.isFinite(distance) || !Number.isFinite(duration)) return [];
+    result.push({ id: ids[i], distance, duration });
+  }
+  return result;
+}
+
+/**
+ * Ключ кэша: положение округляем до ~100 м и точки тоже — иначе каждый метр
+ * пути создавал бы новую запись, и кэш был бы бесполезен.
+ */
+function rideRouteKey(
+  from: { lat: number; lon: number },
+  points: { id: string; lat: number; lon: number }[],
+): string {
+  const start = `${from.lat.toFixed(3)},${from.lon.toFixed(3)}`;
+  const rest = points.map((p) => `${p.id}:${p.lat.toFixed(3)},${p.lon.toFixed(3)}`).join("|");
+  return RIDE_ROUTE_PREFIX + addressKey(`${start}|${rest}`);
+}
+
+/**
+ * Маршрут по дорогам от положения машины до точек (по порядку).
+ * null — маршрут построить не удалось: приложение скажет об этом честно.
+ */
+export async function buildRideRoute(
+  from: { lat: number; lon: number },
+  points: { id: string; lat: number; lon: number }[],
+): Promise<GeoRideRoute | null> {
+  const list = points
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
+    .slice(0, GEO_MAX_RIDE_POINTS);
+  if (!Number.isFinite(from.lat) || !Number.isFinite(from.lon) || list.length === 0) return null;
+
+  const key = rideRouteKey(from, list);
+  try {
+    const saved = await storage.getSetting(key);
+    if (saved) {
+      const parsed = JSON.parse(saved.value) as { at?: string; route?: GeoRideRoute };
+      const at = Date.parse(parsed.at ?? "");
+      if (parsed.route && Number.isFinite(at) && Date.now() - at < RIDE_ROUTE_TTL_MS) {
+        return parsed.route;
+      }
+    }
+  } catch (err) {
+    console.error("[geo] Кэш дорожного маршрута недоступен:", err);
+  }
+
+  const coordinates = [from, ...list].map((p) => `${p.lon.toFixed(5)},${p.lat.toFixed(5)}`).join(";");
+  const url =
+    `${OSRM_ENDPOINT}/${coordinates}?overview=simplified&geometries=geojson&steps=false`;
+  const raw = await serial(async () => {
+    const response = await fetch(url, {
+      headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`OSRM ${response.status}`);
+    return (await response.json()) as OsrmResponse;
+  });
+
+  const parsed = parseOsrmRoute(raw);
+  if (!parsed) return null;
+  const route: GeoRideRoute = {
+    ...parsed,
+    legs: parseOsrmLegs(raw, list.map((p) => p.id)),
+  };
+  try {
+    await storage.setSetting(key, JSON.stringify({ at: new Date().toISOString(), route }));
+  } catch (err) {
+    console.error("[geo] Не удалось сохранить дорожный маршрут в кэш:", err);
   }
   return route;
 }

@@ -274,6 +274,23 @@ export interface GeoRoute {
   geometry: [number, number][];
 }
 
+/** Дорожный маршрут от машины до точек — то, что видит водитель в поездке. */
+export interface GeoRideLeg {
+  /** К какой точке ведёт этот участок. */
+  id: string;
+  distance: number;
+  duration: number;
+}
+
+export interface GeoRideRoute {
+  /** Километры и время от машины через все оставшиеся точки. */
+  distance: number;
+  duration: number;
+  geometry: [number, number][];
+  /** По каждому участку: «до точки 3,4 км, 12 мин». */
+  legs: GeoRideLeg[];
+}
+
 export interface GeoPlanResult {
   stops: GeoStopResult[];
   route: GeoRoute | null;
@@ -434,6 +451,22 @@ export const api = {
    * ответе remaining > 0, запрос нужно повторить. Уже найденное сервер отдаёт
    * из кэша мгновенно, поэтому точки появляются на карте постепенно.
    */
+  /**
+   * Дорожный маршрут от текущего положения машины до оставшихся точек.
+   * Считается по движению, а не постоянно: сервер кэширует ответ по сетке
+   * ~100 метров, чтобы не мучить бесплатный маршрутизатор OSM.
+   */
+  rideRoute: (
+    token: string,
+    from: { lat: number; lon: number },
+    points: { id: string; lat: number; lon: number }[],
+  ) =>
+    request("/api/admin/geo/route", {
+      method: "POST",
+      body: { from, points },
+      token,
+    }) as Promise<GeoRideRoute>,
+
   /**
    * Координаты точек маршрута. refresh = true — ручное «Повторить»: сервер
    * заново проверит адреса, которые в прошлый раз не нашлись.
