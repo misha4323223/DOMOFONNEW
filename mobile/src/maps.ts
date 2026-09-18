@@ -92,6 +92,33 @@ export async function openPointInNavigator(
   }
 }
 
+/**
+ * Открыть в Яндекс Картах весь оставшийся маршрут — все точки по порядку.
+ *
+ * Это самый близкий к «как в навигаторе» вариант без платных SDK: Яндекс сам
+ * ведёт голосом от точки к точке, и не нужно открывать каждую заявку отдельно.
+ * Для одной точки ведём себя как обычно — открываем её.
+ */
+export async function openRouteInNavigator(
+  points: { lat: number; lon: number }[],
+  firstLabel: string,
+): Promise<boolean> {
+  const list = points.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+  if (list.length === 0) return false;
+  if (list.length === 1) return openPointInNavigator(list[0].lat, list[0].lon, firstLabel);
+
+  // rtext=~точка~точка — маршрут «откуда я сейчас» через все точки подряд.
+  const rtext = ["", ...list.map((p) => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`)].join("~");
+  const webUrl = `https://yandex.ru/maps/?rtext=${rtext}&rtt=auto`;
+  try {
+    await Linking.openURL(webUrl);
+    return true;
+  } catch {
+    // Яндекс Карты не открылись — ведём хотя бы к первой точке.
+    return openPointInNavigator(list[0].lat, list[0].lon, firstLabel);
+  }
+}
+
 /** Город, который выбирали в прошлый раз (показываем его первым). */
 export async function getLastRouteCity(): Promise<string | null> {
   try {

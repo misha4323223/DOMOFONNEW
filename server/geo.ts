@@ -365,9 +365,21 @@ export function addressVariants(address: string, city?: string): string[] {
 
 // --- OSRM: линия маршрута, километры, время -------------------------------
 
+interface OsrmStep {
+  /** Название улицы, по которой идём после манёвра (может быть пустым). */
+  name?: string;
+  maneuver?: {
+    type?: string;
+    modifier?: string;
+    /** Координаты манёвра: [долгота, широта]. */
+    location?: [number, number];
+  };
+}
+
 interface OsrmLeg {
   distance?: number;
   duration?: number;
+  steps?: OsrmStep[];
 }
 
 interface OsrmResponse {
@@ -459,6 +471,85 @@ export interface GeoRideLeg {
   id: string;
   distance: number;
   duration: number;
+  /** Повороты участка — из них приложение делает подсказки, как в навигаторе. */
+  maneuvers: GeoManeuver[];
+}
+
+/**
+ * Подсказка о манёвре: что делать и где это происходит.
+ *
+ * Приложение само считает, сколько метров до манёвра (по мере движения), а
+ * сервер отвечает за текст: переводить «turn right» на русский здесь проще,
+ * чем в приложении, и в кэше текст уже готов.
+ */
+export interface GeoManeuver {
+  /** «направо», «налево», «по кругу», «прибытие»… */
+  text: string;
+  /** Улица, на которую выезжаем; пустая строка — маршрутизатор не знает. */
+  street: string;
+  lat: number;
+  lon: number;
+}
+
+/** Больше сорока подсказок на участок водителю не нужно, а платить за них трафиком — да. */
+const LEG_MAX_MANEUVERS = 40;
+const MANEUVER_STREET_MAX = 40;
+
+/** Как назвать поворот человеческим языком. */
+const MODIFIER_TEXT: Record<string, string> = {
+  right: "направо",
+  left: "налево",
+  "slight right": "правее",
+  "slight left": "левее",
+  "sharp right": "резко направо",
+  "sharp left": "резко налево",
+  uturn: "разворот",
+  straight: "прямо",
+};
+
+/** Разобрать один шаг маршрута в подсказку. null — объявлять нечего. */
+function parseManeuver(step: OsrmStep): GeoManeuver | null {
+  const type = step.maneuver?.type ?? "";
+  const modifier = step.maneuver?.modifier ?? "";
+  const location = step.maneuver?.location;
+  // Начало движения объявлять незачем: водитель и так только что поехал.
+  if (type === "depart") return null;
+  if (!Array.isArray(location) || location.length !== 2) return null;
+  const lon = Number(location[0]);
+  const lat = Number(location[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  let text: string;
+  if (type === "arrive") {
+    text = "прибытие";
+  } else if (type === "roundabout" || type === "rotary") {
+    text = "по кругу";
+  } else if (type === "merge") {
+    text = "слияние";
+  } else if (type === "on ramp") {
+    text = "выезд на трассу";
+  } else if (type === "off ramp") {
+    text = "съезд";
+  } else if (type === "fork") {
+    text = "развилка";
+  } else if (type === "end of road") {
+    text = MODIFIER_TEXT[modifier] ?? "поворот";
+  } else {
+    const word = MODIFIER_TEXT[modifier];
+    // «Продолжайте движение прямо» — это не манёвр: такие объявления только
+    // заглушают настоящий поворот и раздражают водителя.
+    if ((type === "continue" || type === "new name" || !type) && (!word || word === "прямо")) {
+      return null;
+    }
+    text = word ?? "поворот";
+  }
+
+  return {
+    text,
+    street: (step.name ?? "").trim().slice(0, MANEUVER_STREET_MAX),
+    lat,
+    lon,
+  };
 }
 
 export interface GeoRideRoute {
@@ -472,7 +563,61 @@ export interface GeoRideRoute {
 /** Дальше двадцати точек URL уже неприлично длинный, да и карта не читается. */
 export const GEO_MAX_RIDE_POINTS = 20;
 
-const RIDE_ROUTE_PREFIX = "route:live:";
+/**
+ * v2 — в кэше появились подсказки манёвров: старые записи (без поворотов)
+ * не должны показываться как «поворотов нет».
+ */
+const RIDE_ROUTE_PREFIX = "route:live:v2:";
+
+/**
+ * Линия для навигатора: впереди — точная, дальше — реже.
+ *
+ * Подсказка «через 300 м направо» считается в приложении по самой линии,
+ * поэтому рядом с машиной точки должны стоять часто. Упрощённой линии
+ * OSRM для этого хватает только на длинных прямых: на 93 км приходило
+ * 35 точек — почти три километра между соседними, никакой точности.
+ * Поэтому берём полную линию, но дальний конец прореживаем: трафик на
+ * телефоне важен, а точность нужна только там, где машина едет сейчас.
+ */
+const DENSE_AHEAD_METERS = 15_000;
+const FAR_STEP = 8;
+const GEOMETRY_MAX_POINTS = 3000;
+
+/** Расстояние по прямой между двумя точками, в метрах. */
+function metersBetween(a: [number, number], b: [number, number]): number {
+  const R = 6371000;
+  const rad = Math.PI / 180;
+  const dLat = (b[0] - a[0]) * rad;
+  const dLon = (b[1] - a[1]) * rad;
+  const la1 = a[0] * rad;
+  const la2 = b[0] * rad;
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+/** Точная линия на первые километры пути, дальше — каждый восьмой поворот. */
+function trimGeometry(points: [number, number][]): [number, number][] {
+  if (points.length <= 2) return points;
+  const out: [number, number][] = [points[0]];
+  let passed = 0;
+  let from = points[0];
+  for (let i = 1; i < points.length; i += 1) {
+    const far = passed > DENSE_AHEAD_METERS;
+    if (!far || i % FAR_STEP === 0) {
+      out.push(points[i]);
+      if (out.length >= GEOMETRY_MAX_POINTS) break;
+    }
+    passed += metersBetween(from, points[i]);
+    from = points[i];
+  }
+  // Последняя точка — сама точка маршрута: без неё линия не дойдёт до адреса.
+  const last = points[points.length - 1];
+  const tail = out[out.length - 1];
+  if (tail[0] !== last[0] || tail[1] !== last[1]) out.push(last);
+  return out;
+}
 /** Сколько живёт расчёт: дорога с точностью до ста метров не меняется часами. */
 const RIDE_ROUTE_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -485,7 +630,13 @@ export function parseOsrmLegs(data: OsrmResponse | undefined, ids: string[]): Ge
     const distance = Number(legs[i]?.distance);
     const duration = Number(legs[i]?.duration);
     if (!Number.isFinite(distance) || !Number.isFinite(duration)) return [];
-    result.push({ id: ids[i], distance, duration });
+    const maneuvers: GeoManeuver[] = [];
+    for (const step of legs[i]?.steps ?? []) {
+      const maneuver = parseManeuver(step);
+      if (maneuver) maneuvers.push(maneuver);
+      if (maneuvers.length >= LEG_MAX_MANEUVERS) break;
+    }
+    result.push({ id: ids[i], distance, duration, maneuvers });
   }
   return result;
 }
@@ -531,8 +682,11 @@ export async function buildRideRoute(
   }
 
   const coordinates = [from, ...list].map((p) => `${p.lon.toFixed(5)},${p.lat.toFixed(5)}`).join(";");
+  // steps=true — маршрутизатор отдаёт повороты, из них приложение делает
+  // подсказки «через 300 м направо». Это тот же один запрос, что и раньше.
+  // overview=full — плотная линия: подсказки считаются по ней прямо на телефоне.
   const url =
-    `${OSRM_ENDPOINT}/${coordinates}?overview=simplified&geometries=geojson&steps=false`;
+    `${OSRM_ENDPOINT}/${coordinates}?overview=full&geometries=geojson&steps=true`;
   const raw = await serial(async () => {
     const response = await fetch(url, {
       headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
@@ -546,6 +700,7 @@ export async function buildRideRoute(
   if (!parsed) return null;
   const route: GeoRideRoute = {
     ...parsed,
+    geometry: trimGeometry(parsed.geometry),
     legs: parseOsrmLegs(raw, list.map((p) => p.id)),
   };
   try {

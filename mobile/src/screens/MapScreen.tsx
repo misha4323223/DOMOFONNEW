@@ -42,7 +42,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { api, isNetworkError, type GeoPlanResult, type GeoRideRoute } from "../api";
-import { openPointInNavigator } from "../maps";
+import { openPointInNavigator, openRouteInNavigator } from "../maps";
 import { colors } from "../theme";
 
 /** Встроенный браузер. null — в этой сборке APK его ещё нет. */
@@ -100,12 +100,25 @@ interface Props {
 const MAX_ROUNDS = 12;
 
 /**
- * Когда пересчитывать дорогу от машины: уехали на 400 метров или прошло
- * полторы минуты. Бесплатный маршрутизатор OSM — не полигон для тысяч
- * запросов, а для вождения такого шага достаточно.
+ * Когда пересчитывать дорогу от машины.
+ *
+ * Раньше считали по движению — каждые 400 метров. Теперь подсказки «через
+ * 300 м направо» и остаток пути приложение считает само по уже полученной
+ * линии, поэтому частый пересчёт ничего не уточняет, а только грузит
+ * бесплатный маршрутизатор OSM (его правило — не чаще запроса в секунду).
+ *
+ * Пересчитываем только когда это правда нужно: свернули с линии, линия
+ * впереди почти закончилась, уехали от точки прошлого расчёта далеко или
+ * прошло много времени. Заодно это бережёт трафик телефона.
  */
-const RIDE_MOVE_METERS = 400;
-const RIDE_MAX_AGE_MS = 90_000;
+const RIDE_MOVE_METERS = 1500;
+const RIDE_MAX_AGE_MS = 5 * 60_000;
+/** Отклонились от линии — значит, уехали не туда: строим дорогу заново. */
+const RIDE_OFF_ROUTE_METERS = 150;
+/** Линия впереди почти закончилась — пора строить следующую. */
+const RIDE_MIN_AHEAD_METERS = 1500;
+/** Минимальная пауза между запросами к сервису маршрутов. */
+const RIDE_MIN_REQUEST_MS = 30_000;
 
 /** HTML-каркас карты. Данные приходят отдельно — через window.__setRoute. */
 const MAP_HTML = `<!DOCTYPE html>
@@ -124,8 +137,30 @@ const MAP_HTML = `<!DOCTYPE html>
   .pin.current { width: 38px; height: 38px; border-radius: 19px; margin: 0;
     background: #f59e0b; color: #111827; border-color: #fbbf24; font-size: 18px; }
   .pin.done { background: #14532d; color: #86efac; border-color: #22c55e; opacity: .85; }
-  .me { width: 16px; height: 16px; border-radius: 8px; background: #3b82f6;
-    border: 3px solid #dbeafe; box-shadow: 0 0 0 6px rgba(59,130,246,.25); }
+  .mec { position: relative; width: 44px; height: 44px; }
+  .halo { position: absolute; top: 0; left: 0; right: 0; bottom: 0; margin: auto;
+    width: 40px; height: 40px; border-radius: 20px; background: rgba(59,130,246,.22); }
+  .dot { position: absolute; top: 0; left: 0; right: 0; bottom: 0; margin: auto;
+    width: 16px; height: 16px; border-radius: 8px; background: #3b82f6;
+    border: 3px solid #dbeafe; box-sizing: border-box; }
+  .car { position: absolute; top: 0; left: 0; right: 0; bottom: 0; margin: auto;
+    width: 34px; height: 34px; display: none; transform-origin: 50% 50%; }
+  .car svg { display: block; }
+  .mec.ride .dot { display: none; }
+  .mec.ride .halo { background: rgba(59,130,246,.14); }
+  .mec.ride .car { display: block; }
+  .man { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 900;
+    display: none; align-items: center; gap: 12px; padding: 10px 14px;
+    border-radius: 14px; background: rgba(17,24,39,.94);
+    border: 1px solid rgba(96,165,250,.45); box-shadow: 0 4px 14px rgba(0,0,0,.5); }
+  .man.show { display: flex; }
+  .manArrow { flex: none; width: 40px; height: 40px; border-radius: 20px;
+    background: #2563eb; color: #fff; display: flex; align-items: center;
+    justify-content: center; font: 700 22px system-ui, -apple-system, sans-serif; }
+  .manBody { flex: 1; min-width: 0; }
+  .manDist { color: #f8fafc; font: 700 20px system-ui, -apple-system, sans-serif; }
+  .manAct { color: #cbd5e1; font: 13px system-ui, -apple-system, sans-serif;
+    margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #boot { position: absolute; left: 0; right: 0; top: 0; bottom: 0; z-index: 999;
     display: flex; align-items: center; justify-content: center; padding: 24px;
     color: #9ca3af; font: 14px system-ui, -apple-system, sans-serif; text-align: center; }
@@ -137,6 +172,13 @@ const MAP_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <div id="map"></div>
+<div id="man" class="man">
+  <div class="manArrow" id="manArrow"></div>
+  <div class="manBody">
+    <div class="manDist" id="manDist"></div>
+    <div class="manAct" id="manAct"></div>
+  </div>
+</div>
 <div id="boot">Загружаю карту\u2026</div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -145,6 +187,18 @@ const MAP_HTML = `<!DOCTYPE html>
   var DATA = { points: [], route: [], focus: null };
   // ME — где мы сейчас; RIDE — идёт поездка (карта следит за машиной).
   var ME = null, RIDE = false;
+  // HEAD — куда смотрит машина (градусы, 0 — на север). FOLLOW — карта ведёт
+  // машину сама, как в навигаторе; увёл руками — отстаём до кнопки «прицел».
+  var HEAD = 0, FOLLOW = false;
+  // PATH — линия с накопленными метрами до каждой её точки. По ней считаем
+  // «через 300 м направо», не спрашивая сервер на каждый метр пути.
+  var PATH = null, MAN = [], CUR_IDX = -1, lastIdx = -1, lastFix = null;
+  var passedLine = null, aheadLine = null, manKey = '';
+  var CAR_SVG = '<svg width="34" height="34" viewBox="0 0 34 34">' +
+    '<circle cx="17" cy="17" r="16" fill="#2563eb" stroke="#dbeafe" stroke-width="2"/>' +
+    '<path d="M17 6 L26 26 L17 21 L8 26 Z" fill="#ffffff"/></svg>';
+  var CAR_HTML = '<div class="mec"><div class="halo"></div><div class="dot"></div>' +
+    '<div class="car">' + CAR_SVG + '</div></div>';
 
   function pinIcon(point) {
     var cls = point.state === 'done' ? 'pin done'
@@ -173,16 +227,182 @@ const MAP_HTML = `<!DOCTYPE html>
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
+  /** Куда мы едем по компасу: курс между двумя точками, в градусах. */
+  function bearing(a, b) {
+    var rad = Math.PI / 180;
+    var y = Math.sin((b[1] - a[1]) * rad) * Math.cos(b[0] * rad);
+    var x = Math.cos(a[0] * rad) * Math.sin(b[0] * rad) -
+            Math.sin(a[0] * rad) * Math.cos(b[0] * rad) * Math.cos((b[1] - a[1]) * rad);
+    return (Math.atan2(y, x) / rad + 360) % 360;
+  }
+
+  /** Ближайшая точка линии к заданному месту. -1 — линии нет. */
+  function nearestIndex(latlng) {
+    if (!PATH) return -1;
+    var best = -1, bestDist = Infinity;
+    for (var i = 0; i < PATH.pts.length; i += 1) {
+      var d = meters(latlng, PATH.pts[i]);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+  }
+
+  /**
+   * Подготовить линию к работе: накопленные метры до каждой её точки и
+   * индексы подсказок. Делается один раз на новый маршрут, а не на каждый
+   * метр пути — иначе считать «через 300 м» было бы слишком дорого.
+   */
+  function prepPath() {
+    PATH = null;
+    MAN = [];
+    CUR_IDX = -1;
+    lastIdx = -1;
+    manKey = '';
+    var pts = DATA.route || [];
+    if (pts.length < 2) return;
+    var cum = [0];
+    for (var i = 1; i < pts.length; i += 1) {
+      cum.push(cum[i - 1] + meters(pts[i - 1], pts[i]));
+    }
+    PATH = { pts: pts, cum: cum };
+    var list = DATA.maneuvers || [];
+    for (var j = 0; j < list.length; j += 1) {
+      var idx = nearestIndex([list[j].lat, list[j].lon]);
+      if (idx > 1) {
+        MAN.push({
+          idx: idx,
+          text: list[j].text || '',
+          street: list[j].street || '',
+          gap: meters(PATH.pts[idx], [list[j].lat, list[j].lon])
+        });
+      }
+    }
+    MAN.sort(function (a, b) { return a.idx - b.idx; });
+    var point = currentPoint();
+    if (point) CUR_IDX = nearestIndex([point.lat, point.lon]);
+    if (ME) lastIdx = nearestIndex(ME);
+  }
+
+  /** «через 300 м» / «через 1,2 км» — как это говорят навигаторы. */
+  function formatMeters(m) {
+    if (m < 40) return 'сейчас';
+    if (m < 1000) return (Math.round(m / 10) * 10) + ' м';
+    return (Math.round(m / 100) / 10).toFixed(1) + ' км';
+  }
+
+  /** Значок подсказки: стрелка поворота, круг, флажок. */
+  function arrowFor(text) {
+    if (text === 'налево' || text === 'резко налево') return '\u21b0';
+    if (text === 'направо' || text === 'резко направо' || text === 'слияние') return '\u21b1';
+    if (text === 'правее' || text === 'развилка' || text === 'выезд на трассу') return '\u2197';
+    if (text === 'левее') return '\u2196';
+    if (text === 'съезд') return '\u2198';
+    if (text === 'по кругу') return '\u21bb';
+    if (text === 'разворот') return '\u21ba';
+    if (text === 'прибытие') return '\u2691';
+    return '\u2191';
+  }
+
+  /** Машина на карте: стрелка, повёрнутая туда, куда мы едем. */
+  function updateCar() {
+    var box = document.querySelector('.mec');
+    if (!box) return;
+    box.className = RIDE ? 'mec ride' : 'mec';
+    var car = box.querySelector('.car');
+    if (car) car.style.transform = 'rotate(' + Math.round(HEAD) + 'deg)';
+  }
+
+  /** Карта ведёт машину: она — в нижней трети экрана, дорога впереди видна. */
+  function followMe(animate) {
+    if (!map || !ME) return;
+    var z = map.getZoom() < 15 ? 17 : map.getZoom();
+    var size = map.getSize();
+    var p = map.project(L.latLng(ME[0], ME[1]), z);
+    p.y += Math.round(size.y * 0.22);
+    map.setView(map.unproject(p, z), z, { animate: !!animate });
+  }
+
+  /** Линия пути: пройденное — серым, впереди — синим. Как в навигаторе. */
+  function paintRide() {
+    if (!map || !PATH) return;
+    var idx = lastIdx >= 0 ? lastIdx : 0;
+    var passed = PATH.pts.slice(0, idx + 1);
+    var ahead = PATH.pts.slice(idx);
+    if (passed.length > 1) {
+      if (!passedLine) {
+        passedLine = L.polyline(passed, { color: '#64748b', weight: 5, opacity: 0.75 }).addTo(map);
+      } else {
+        passedLine.setLatLngs(passed);
+      }
+    }
+    if (ahead.length > 1) {
+      if (!aheadLine) {
+        aheadLine = L.polyline(ahead, { color: '#38bdf8', weight: 7, opacity: 0.95 }).addTo(map);
+      } else {
+        aheadLine.setLatLngs(ahead);
+      }
+    }
+  }
+
+  function dropRideLines() {
+    if (!map) return;
+    if (passedLine) { map.removeLayer(passedLine); passedLine = null; }
+    if (aheadLine) { map.removeLayer(aheadLine); aheadLine = null; }
+  }
+
+  /** Подсказка о ближайшем повороте — полосой сверху, как в навигаторе. */
+  function updateManeuver() {
+    var box = document.getElementById('man');
+    if (!box) return;
+    if (!RIDE || !ME || !PATH || MAN.length === 0 || lastIdx < 0) {
+      box.className = 'man';
+      manKey = '';
+      return;
+    }
+    var next = null;
+    for (var i = 0; i < MAN.length; i += 1) {
+      var left = PATH.cum[MAN[i].idx] - PATH.cum[lastIdx];
+      // Поворот позади или мы стоим ровно на нём — объявляем следующий.
+      if (left < 0) continue;
+      if (left < 25 && i < MAN.length - 1) continue;
+      next = { left: left + MAN[i].gap, text: MAN[i].text, street: MAN[i].street };
+      break;
+    }
+    if (!next) {
+      box.className = 'man';
+      manKey = '';
+      return;
+    }
+    var key = next.text + '|' + next.street + '|' + Math.round(next.left / 25);
+    if (key !== manKey) {
+      manKey = key;
+      var dist = formatMeters(next.left);
+      document.getElementById('manArrow').textContent = arrowFor(next.text);
+      document.getElementById('manDist').textContent =
+        dist === 'сейчас' ? 'Сейчас' : 'Через ' + dist;
+      document.getElementById('manAct').textContent =
+        next.street ? next.text + ' \u00b7 ' + next.street : next.text;
+    }
+    box.className = 'man show';
+  }
+
   /** Рассказать приложению, где мы и сколько осталось до текущей точки. */
   function publish() {
     if (!window.ReactNativeWebView) return;
     var point = currentPoint();
     var dist = (ME && point) ? Math.round(meters(ME, [point.lat, point.lon])) : null;
+    // Сколько осталось по дорогам — считаем по уже загруженной линии: так
+    // цифры в панели живые, а сервер не дёргаем каждые полминуты.
+    var ahead = null;
+    if (RIDE && PATH && ME && CUR_IDX >= 0 && lastIdx >= 0) {
+      ahead = Math.round(Math.max(0, PATH.cum[CUR_IDX] - PATH.cum[lastIdx]));
+    }
     window.ReactNativeWebView.postMessage(JSON.stringify({
       type: 'pos',
       lat: ME ? ME[0] : null,
       lon: ME ? ME[1] : null,
       dist: dist,
+      ahead: ahead,
       pointNumber: point ? point.number : null,
       arrived: dist !== null && dist <= 200
     }));
@@ -200,16 +420,35 @@ const MAP_HTML = `<!DOCTYPE html>
     }).addTo(map);
   }
 
-  function onPosition(ll) {
+  function onPosition(ll, heading) {
+    // Куда смотрит машина: телефон отдаёт курс, пока едет; не отдал —
+    // считаем сами по двум точкам пути.
+    if (typeof heading === 'number' && isFinite(heading) && heading >= 0) {
+      HEAD = heading;
+    } else if (lastFix && meters(lastFix, ll) > 8) {
+      HEAD = bearing(lastFix, ll);
+    }
+    if (!lastFix || meters(lastFix, ll) > 8) lastFix = ll;
     ME = ll;
     setMe(ll);
-    // В поездке карта сама возвращает машину в кадр, если она уехала за край
-    // (если видно — не мешаем человеку двигать карту руками).
     if (RIDE) {
-      try {
-        if (!map.getBounds().contains(ll)) map.setView(ll, 16, { animate: true });
-      } catch (e) {}
-      drawDirection();
+      var idx = nearestIndex(ll);
+      if (idx >= 0) {
+        // Перерисовываем пройденное/оставшееся только когда отъехали заметно:
+        // каждый метр это делать незачем, картинка от этого не меняется.
+        if (lastIdx < 0 || Math.abs(idx - lastIdx) >= 4) {
+          lastIdx = idx;
+          paintRide();
+        } else {
+          lastIdx = idx;
+        }
+      }
+      // Карта ведёт машину сама; увёл руками — не спорим, но вернём в кадр,
+      // если машина уйдёт за край экрана.
+      if (FOLLOW) followMe(false);
+      else if (!map.getBounds().contains(ll)) map.setView(ll, 17, { animate: true });
+      updateManeuver();
+      if (!PATH) drawDirection();
     }
     publish();
   }
@@ -219,9 +458,13 @@ const MAP_HTML = `<!DOCTYPE html>
     if (layer) { map.removeLayer(layer); }
     layer = L.layerGroup().addTo(map);
 
-    if (DATA.route && DATA.route.length > 1) {
+    // В поездке линия рисуется по-другому: пройденное — серым, впереди —
+    // синим (paintRide). Вне поездки — весь план одной линией.
+    dropRideLines();
+    if (DATA.route && DATA.route.length > 1 && !(RIDE && PATH)) {
       L.polyline(DATA.route, { color: '#38bdf8', weight: 5, opacity: 0.9 }).addTo(layer);
     }
+    if (RIDE && PATH) paintRide();
 
     var bounds = [];
     for (var i = 0; i < DATA.points.length; i++) {
@@ -234,8 +477,13 @@ const MAP_HTML = `<!DOCTYPE html>
 
     var active = RIDE ? currentPoint() : null;
     if (active && ME) {
-      // В поездке в кадре сразу и машина, и точка: видно и где мы, и куда ехать.
-      map.fitBounds([ME, [active.lat, active.lon]], { padding: [70, 70], maxZoom: 16 });
+      // В поездке карту держит навигационный вид: машина в нижней трети,
+      // дорога впереди. Подгонять вид по двум точкам здесь не нужно.
+      if (!RIDE) {
+        map.fitBounds([ME, [active.lat, active.lon]], { padding: [70, 70], maxZoom: 16 });
+      } else if (map.getZoom() < 10) {
+        map.setView(ME, 17, { animate: true });
+      }
     } else if (DATA.focus !== null && DATA.points[DATA.focus]) {
       var f = DATA.points[DATA.focus];
       map.setView([f.lat, f.lon], Math.max(map.getZoom(), 14), { animate: true });
@@ -250,12 +498,13 @@ const MAP_HTML = `<!DOCTYPE html>
     if (!map) return;
     if (!meMarker) {
       meMarker = L.marker(ll, {
-        icon: L.divIcon({ html: '<div class="me"></div>', className: '',
-          iconSize: [22, 22], iconAnchor: [11, 11] })
+        icon: L.divIcon({ html: CAR_HTML, className: '', iconSize: [44, 44], iconAnchor: [22, 22] }),
+        zIndexOffset: 1000
       }).addTo(map);
     } else {
       meMarker.setLatLng(ll);
     }
+    updateCar();
   }
 
   // О причинах неудачи с геопозицией рассказываем приложению: человек должен
@@ -277,7 +526,7 @@ const MAP_HTML = `<!DOCTYPE html>
     try {
       navigator.geolocation.watchPosition(function (pos) {
         reportGeo('ok', null);
-        onPosition([pos.coords.latitude, pos.coords.longitude]);
+        onPosition([pos.coords.latitude, pos.coords.longitude], pos.coords.heading);
       }, function (err) {
         reportGeo('error', (err && err.code) ? err.code : 0);
       }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
@@ -297,7 +546,7 @@ const MAP_HTML = `<!DOCTYPE html>
     try {
       navigator.geolocation.getCurrentPosition(function (pos) {
         reportGeo('ok', null);
-        onPosition([pos.coords.latitude, pos.coords.longitude]);
+        onPosition([pos.coords.latitude, pos.coords.longitude], pos.coords.heading);
         watchMe();
       }, function (err) {
         reportGeo('error', (err && err.code) ? err.code : 0);
@@ -310,26 +559,48 @@ const MAP_HTML = `<!DOCTYPE html>
 
   window.__setRoute = function (data) {
     DATA = data || DATA;
-    if (map) { draw(); drawDirection(); }
+    prepPath();
+    if (map) {
+      draw();
+      if (!PATH) drawDirection();
+      updateManeuver();
+    }
     publish();
   };
   window.__recenter = function () {
     DATA.focus = null;
+    FOLLOW = RIDE;
+    if (RIDE && ME) followMe(true);
     draw();
   };
-  // Поездка: карта следит за машиной и показывает, сколько осталось до точки.
+  // Поездка: карта ведёт машину, показывает повороты и остаток пути.
   window.__ride = function (on) {
     RIDE = !!on;
-    if (!RIDE && dirLine) { map.removeLayer(dirLine); dirLine = null; }
-    if (RIDE && map) {
+    FOLLOW = RIDE;
+    if (!RIDE) {
+      if (dirLine) { map.removeLayer(dirLine); dirLine = null; }
+      dropRideLines();
+      updateCar();
+      updateManeuver();
+      draw();
+      publish();
+      return;
+    }
+    if (map && ME) {
       var point = currentPoint();
-      if (ME && point) {
-        map.fitBounds([ME, [point.lat, point.lon]], { padding: [70, 70], maxZoom: 16 });
-      } else if (ME) {
-        map.setView(ME, 16, { animate: true });
+      var far = point ? meters(ME, [point.lat, point.lon]) : 0;
+      // Далеко до точки — показываем весь путь целиком; подъехали —
+      // включаем навигационный вид и приближаем, как в навигаторе.
+      if (point && far > 5000) {
+        map.fitBounds([ME, [point.lat, point.lon]], { padding: [60, 60], maxZoom: 14 });
+      } else {
+        map.setView(ME, 17, { animate: true });
       }
     }
-    drawDirection();
+    updateCar();
+    draw();
+    if (!PATH) drawDirection();
+    updateManeuver();
     publish();
   };
 
@@ -340,6 +611,9 @@ const MAP_HTML = `<!DOCTYPE html>
   }
   document.getElementById('boot').style.display = 'none';
   map = L.map('map', { zoomControl: false, attributionControl: true });
+  // Человек увёл карту пальцем — перестаём тянуть её за машиной, пока не
+  // нажмёт «прицел»: иначе карта воюет с пальцем.
+  map.on('dragstart', function () { FOLLOW = false; });
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '\u00a9 OpenStreetMap'
@@ -400,6 +674,35 @@ function plural(n: number, forms: [string, string, string]): string {
   return forms[2];
 }
 
+/**
+ * Где машина относительно линии: насколько отклонилась и сколько линии
+ * осталось впереди. Считаем на телефоне — из-за этого сервер не дёргаем.
+ */
+function progressOnRoute(
+  geometry: [number, number][],
+  me: { lat: number; lon: number } | null,
+): { offRoute: number; ahead: number } | null {
+  if (!me || geometry.length < 2) return null;
+  let bestIdx = -1;
+  let bestDist = Infinity;
+  for (let i = 0; i < geometry.length; i += 1) {
+    const d = metersBetween({ lat: geometry[i][0], lon: geometry[i][1] }, me);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  if (bestIdx < 0) return null;
+  let ahead = 0;
+  for (let i = bestIdx; i < geometry.length - 1; i += 1) {
+    ahead += metersBetween(
+      { lat: geometry[i][0], lon: geometry[i][1] },
+      { lat: geometry[i + 1][0], lon: geometry[i + 1][1] },
+    );
+  }
+  return { offRoute: bestDist, ahead };
+}
+
 const NO_WEBVIEW_HINT =
   "Карта появится после обновления приложения: эта сборка ещё не умеет показывать карты внутри себя. Скачайте новую версию APK — и карта заработает.";
 
@@ -419,9 +722,14 @@ export function MapScreen({
   const [unavailable, setUnavailable] = useState(false);
   /** Идёт поездка: карта следит за машиной и сама ведёт к следующей точке. */
   const [riding, setRiding] = useState(false);
-  /** Что карта рассказала о нашем положении: сколько осталось до точки. */
-  const [ride, setRide] = useState<{ dist: number | null; arrived: boolean }>({
+  /**
+   * Что карта рассказала о нашем положении.
+   * dist — по прямой, ahead — по дорогам (карта считает его по загруженной
+   * линии, поэтому цифры живые, а сервер не переспрашиваем каждый метр).
+   */
+  const [ride, setRide] = useState<{ dist: number | null; ahead: number | null; arrived: boolean }>({
     dist: null,
+    ahead: null,
     arrived: false,
   });
   /** Где мы сейчас — карта присылает вместе с расстоянием до точки. */
@@ -540,6 +848,22 @@ export function MapScreen({
       points,
       // В поездке рисуем дорогу от машины; вне поездки — план между точками.
       route: riding && road ? road.geometry : (geo?.route?.geometry ?? []),
+      /**
+       * Повороты. Метры до ближайшего карта считает сама по линии и по
+       * геопозиции, поэтому подсказка обновляется на каждом обновлении
+       * положения, а сервер переспрашиваем редко.
+       */
+      maneuvers:
+        riding && road
+          ? road.legs.flatMap((leg) =>
+              (leg.maneuvers ?? []).map((m) => ({
+                lat: m.lat,
+                lon: m.lon,
+                text: m.text,
+                street: m.street,
+              })),
+            )
+          : [],
       // Пунктир по прямой нужен только когда дороги ещё нет.
       directionHint: !(riding && road),
       focus: currentCoords ? points.findIndex((p) => p.number === currentIndex + 1) : null,
@@ -559,8 +883,12 @@ export function MapScreen({
     return list;
   }, [stops, currentIndex, coordsById]);
 
-  // Раз в полминуты пересчитываем срок годности маршрута — чтобы «буду в 14:20»
-  // не врало, если машина стоит в пробке.
+  // Где мы относительно линии и сколько её ещё впереди — считаем сами,
+  // на телефоне: это нужно, чтобы понять, пора ли строить маршрут заново.
+  const pathInfo = useMemo(() => progressOnRoute(road?.geometry ?? [], me), [road, me]);
+
+  // Раз в полминуты проверяем, не пора ли пересчитать дорогу (например, машина
+  // стоит в пробке и остаток пути от времени уже не тот).
   const [rideTick, setRideTick] = useState(0);
   useEffect(() => {
     if (!riding) return;
@@ -575,15 +903,24 @@ export function MapScreen({
 
   /**
    * Дорожный маршрут от машины до оставшихся точек. Считаем при старте поездки,
-   * после каждой точки и когда машина уехала от места прошлого расчёта.
+   * после каждой точки и только когда это правда нужно: подсказки про повороты
+   * и остаток пути приложение считает само по уже полученной линии.
    */
   useEffect(() => {
     if (!riding || !me || aheadStops.length === 0) return;
     const last = roadRef.current;
     if (last) {
-      const moved = metersBetween(last, me);
       const age = Date.now() - last.at;
-      if (moved < RIDE_MOVE_METERS && age < RIDE_MAX_AGE_MS) return;
+      // Не чаще раза в полминуты: правила OSM — не чаще запроса в секунду,
+      // и повторный расчёт ничего не уточнит за такой короткий срок.
+      if (age < RIDE_MIN_REQUEST_MS) return;
+      const moved = metersBetween(last, me);
+      const stale = moved >= RIDE_MOVE_METERS || age >= RIDE_MAX_AGE_MS;
+      // Свернули с линии — перестраиваем сразу: человек явно поехал не туда.
+      const offRoute = pathInfo ? pathInfo.offRoute > RIDE_OFF_ROUTE_METERS : false;
+      // Линия впереди почти кончилась — дальше рисовать нечего.
+      const ended = pathInfo ? pathInfo.ahead < RIDE_MIN_AHEAD_METERS : false;
+      if (!stale && !offRoute && !ended) return;
     }
     roadRef.current = { at: Date.now(), lat: me.lat, lon: me.lon };
     // Номер запроса: ответ на устаревший (пока ехали) просто не применяем.
@@ -602,13 +939,24 @@ export function MapScreen({
         // Не получилось — оставляем прежнюю линию и говорим об этом честно.
         if (roadReqRef.current === reqId) setRoadFailed(true);
       });
-  }, [riding, me, rideTick, aheadStops, token]);
+  }, [riding, me, rideTick, aheadStops, token, pathInfo]);
 
   /** Участок до текущей точки — из него берём «осталось» и время прибытия. */
   const currentLeg = useMemo(() => {
     if (!road || !currentId) return null;
     return road.legs.find((leg) => leg.id === currentId) ?? null;
   }, [road, currentId]);
+
+  /**
+   * Время до текущей точки по живым данным: остаток по дорогам (его считает
+   * карта) умножаем на среднюю скорость участка. Так «буду в 14:20» не
+   * замирает между пересчётами дороги.
+   */
+  const etaSeconds = useMemo(() => {
+    if (!currentLeg || ride.ahead === null || currentLeg.distance <= 0) return null;
+    const share = Math.min(1, Math.max(0, ride.ahead / currentLeg.distance));
+    return Math.round(currentLeg.duration * share);
+  }, [currentLeg, ride.ahead]);
 
   // Обновляем карту без перезагрузки страницы: маршрут перестраивается на месте.
   useEffect(() => {
@@ -666,6 +1014,7 @@ export function MapScreen({
       lat?: number | null;
       lon?: number | null;
       dist?: number | null;
+      ahead?: number | null;
       arrived?: boolean;
       status?: string;
       code?: number | null;
@@ -690,12 +1039,13 @@ export function MapScreen({
     }
     setRide({
       dist: typeof data.dist === "number" ? data.dist : null,
+      ahead: typeof data.ahead === "number" ? data.ahead : null,
       arrived: data.arrived === true,
     });
   }, []);
 
   const startRide = useCallback(() => {
-    setRide({ dist: null, arrived: false });
+    setRide({ dist: null, ahead: null, arrived: false });
     roadRef.current = null;
     setRiding(true);
   }, []);
@@ -714,9 +1064,26 @@ export function MapScreen({
    */
   const completeCurrent = useCallback(() => {
     if (!currentStop) return;
-    setRide({ dist: null, arrived: false });
+    setRide({ dist: null, ahead: null, arrived: false });
     onComplete(currentStop.id);
   }, [currentStop, onComplete]);
+
+  /**
+   * Весь оставшийся маршрут — в Яндекс Карты: он ведёт голосом от точки
+   * к точке, и открывать каждую заявку руками не нужно.
+   */
+  const ridePoints = useMemo(
+    () => aheadStops.map((stop) => ({ lat: stop.lat, lon: stop.lon })),
+    [aheadStops],
+  );
+
+  const handleWholeRoute = useCallback(async () => {
+    if (ridePoints.length === 0) return;
+    await openRouteInNavigator(
+      ridePoints,
+      currentStop?.address || currentStop?.name || "Заявка",
+    );
+  }, [ridePoints, currentStop]);
 
   const handleNavigate = useCallback(async () => {
     if (!currentStop) return;
@@ -742,17 +1109,18 @@ export function MapScreen({
         <Text style={styles.headerTitle}>Карта маршрута</Text>
         <Text style={styles.headerSubtitle}>
           {loading
-            ? `Определяю адреса… ${foundCount} из ${stops.length}`
-            : riding
-              ? `Поездка · точка ${currentIndex + 1} из ${stops.length}${
-                  currentLeg
-                    ? ` · ${formatDistance(currentLeg.distance)} · буду ~${formatClock(
-                        currentLeg.duration,
-                      )}`
-                    : ride.dist !== null
-                      ? ` · ${formatDistance(ride.dist)}`
-                      : ""
-                }`
+            ? `Определяю адреса… ${foundCount} из ${stops.length}`              : riding
+                ? `Поездка · точка ${currentIndex + 1} из ${stops.length}${
+                    ride.ahead !== null && etaSeconds !== null
+                      ? ` · ${formatDistance(ride.ahead)} · буду ~${formatClock(etaSeconds)}`
+                      : currentLeg
+                        ? ` · ${formatDistance(currentLeg.distance)} · буду ~${formatClock(
+                            currentLeg.duration,
+                          )}`
+                        : ride.dist !== null
+                          ? ` · ${formatDistance(ride.dist)}`
+                          : ""
+                  }`
               : geo?.route
                 ? `${formatDistance(geo.route.distance)} · ${formatDuration(geo.route.duration)}`
                 : `${stops.length} ${plural(stops.length, ["точка", "точки", "точек"])}`}
@@ -892,11 +1260,15 @@ export function MapScreen({
                 >
                   {ride.arrived
                     ? "Вы на месте — отмечайте выполнение"
-                    : currentLeg
-                      ? `до точки ${formatDistance(currentLeg.distance)} · ${formatDuration(
-                          currentLeg.duration,
-                        )} · буду ~${formatClock(currentLeg.duration)}`
-                      : ride.dist !== null
+                    : ride.ahead !== null && etaSeconds !== null
+                      ? `до точки ${formatDistance(ride.ahead)} · ${formatDuration(
+                          etaSeconds,
+                        )} · буду ~${formatClock(etaSeconds)}`
+                      : currentLeg
+                        ? `до точки ${formatDistance(currentLeg.distance)} · ${formatDuration(
+                            currentLeg.duration,
+                          )} · буду ~${formatClock(currentLeg.duration)}`
+                        : ride.dist !== null
                         ? `осталось ${formatDistance(ride.dist)} по прямой`
                         : geoIssue === "denied"
                         ? "приложению запрещён доступ к геопозиции"
@@ -968,6 +1340,21 @@ export function MapScreen({
                 </Pressable>
               )}
             </View>
+
+            {ridePoints.length > 1 ? (
+              <View style={styles.rideActions}>
+                <Pressable
+                  style={({ pressed }) => [styles.rideAction, pressed && { opacity: 0.8 }]}
+                  onPress={() => void handleWholeRoute()}
+                >
+                  <Ionicons name="navigate-circle" size={16} color={colors.text} />
+                  <Text style={styles.rideActionText}>
+                    Весь маршрут в Навигаторе · {ridePoints.length}{" "}
+                    {plural(ridePoints.length, ["точка", "точки", "точек"])}
+                  </Text>
+                </Pressable>
+              </View>
+            ) : null}
           </View>
         ) : currentStop ? (
           <View style={styles.footer}>
