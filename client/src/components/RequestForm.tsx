@@ -27,13 +27,16 @@ import { apiRequest } from "@/lib/queryClient";
 import { Loader2, PhoneCall, Send, CheckCircle2 } from "lucide-react";
 import { useState } from "react";
 import type { FormContent } from "@shared/content";
+import { SITE_PHONE_PATTERN } from "@shared/schema";
 
 const requestSchema = z.object({
   name: z.string().min(2, "Укажите имя"),
+  // Телефон для заявок с сайта обязателен: без него клиенту нельзя перезвонить.
+  // Правило одно на форму и на сервер (SITE_PHONE_PATTERN).
   phone: z
     .string()
     .min(10, "Укажите корректный номер телефона")
-    .regex(/^[+\d][\d\s\-()]{9,}$/, "Номер телефона выглядит неверно"),
+    .regex(SITE_PHONE_PATTERN, "Номер телефона выглядит неверно"),
   service: z.string().min(1, "Выберите тип заявки"),
   address: z.string().min(5, "Укажите адрес: город, улица, дом, квартира"),
   comment: z.string().optional(),

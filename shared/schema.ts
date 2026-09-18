@@ -133,12 +133,33 @@ export function leadPartsDiff(
   return diffs;
 }
 
+/**
+ * Телефон заявки с сайта: клиент без номера отправить заявку не может.
+ *
+ * Правило живёт здесь, а не только в форме, потому что ту же проверку делает
+ * сервер: в обход формы заявку без телефона принять нельзя.
+ */
+export const SITE_PHONE_PATTERN = /^[+\d][\d\s\-()]{9,}$/;
+
+/** Годен ли телефон для заявки с сайта (проверяют и форма, и сервер). */
+export function isSitePhone(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return trimmed.length >= 10 && SITE_PHONE_PATTERN.test(trimmed);
+}
+
 export const insertLeadSchema = createInsertSchema(leads)
   .omit({
     id: true,
     createdAt: true,
   })
   .extend({
+    // Телефон НЕ обязателен: заявку можно добавить вручную из приложения без
+    // номера (клиент подошёл лично, номер узнаем позже). В базе такой телефон
+    // лежит пустой строкой, а повторные обращения ищутся по адресу.
+    // Для заявок с сайта телефон обязателен — это проверяет эндпоинт /api/leads
+    // через isSitePhone(), клиентская форма требует его своим правилом.
+    phone: z.string().default(""),
     comment: z.string().nullish(),
     // Статус заявки: новая / срочно / выполнена
     status: z.enum(LEAD_STATUSES).default("new"),

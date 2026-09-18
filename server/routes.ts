@@ -4,6 +4,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import {
   insertLeadSchema,
+  isSitePhone,
   leadPartsDiff,
   normalizeLeadParts,
   normalizeRoutePlan,
@@ -687,13 +688,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return res.status(201).json(lead);
   }));
 
-  // Заявки на обслуживание
+  // Заявки на обслуживание (публичная форма сайта)
   app.post("/api/leads", asyncHandler(async (req: Request, res: Response) => {
     const parsed = insertLeadSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
         message: "Проверьте правильность заполнения формы",
         errors: parsed.error.flatten(),
+      });
+    }
+
+    // Телефон у заявки с сайта обязателен: иначе клиенту нельзя перезвонить.
+    // Форма проверяет то же самое, но сервер не должен верить только ей —
+    // в обход формы заявку без номера принять нельзя. Ручные заявки из
+    // приложения (/api/leads/admin) сохраняются и без телефона.
+    if (!isSitePhone(parsed.data.phone)) {
+      return res.status(400).json({
+        message: "Укажите корректный номер телефона",
+        errors: { phone: ["Укажите корректный номер телефона"] },
       });
     }
 

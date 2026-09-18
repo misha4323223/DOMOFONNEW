@@ -99,7 +99,10 @@ async function sendPush(title: string, body: string, data: PushData): Promise<vo
 export async function notifyNewLead(lead: Lead): Promise<void> {
   const service = SERVICE_LABELS[lead.service] ?? lead.service;
   const title = "📩 Новая заявка";
-  const body = `${lead.name}, ${lead.phone} — ${service}${lead.address ? `, ${lead.address}` : ""}`;
+  // Телефон не обязателен (заявку можно завести вручную без номера) — тогда
+  // в тексте уведомления его просто нет, а не пустая строка с запятой.
+  const who = lead.phone ? `${lead.name}, ${lead.phone}` : lead.name;
+  const body = `${who} — ${service}${lead.address ? `, ${lead.address}` : ""}`;
   await sendPush(title, body, { leadId: lead.id, screen: "leads" });
 }
 
