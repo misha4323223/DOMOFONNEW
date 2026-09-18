@@ -12,6 +12,7 @@ import { LeadFormScreen } from "./src/screens/LeadFormScreen";
 import { ScanScreen } from "./src/screens/ScanScreen";
 import { ReviewScreen } from "./src/screens/ReviewScreen";
 import { ContentScreen } from "./src/screens/ContentScreen";
+import { PagesScreen } from "./src/screens/PagesScreen";
 import { NotesScreen } from "./src/screens/NotesScreen";
 import { StockScreen } from "./src/screens/StockScreen";
 import { RouteScreen } from "./src/screens/RouteScreen";
@@ -26,6 +27,10 @@ import { colors } from "./src/theme";
 import { BottomNav, type NavTarget } from "./src/components/BottomNav";
 import { IntroSplash } from "./src/components/IntroSplash";
 import { fetchChatUnread, markAllChatRead } from "./src/unread";
+// Службы поездки (фоновая геолокация и кнопки в уведомлении) должны быть
+// объявлены до старта любых задач, поэтому модуль подключается при запуске
+// приложения — вместе с ним регистрируются и задачи.
+import { queuePendingAction } from "./src/rideTrack";
 
 const TOKEN_KEY = "admin_token";
 // Заставка: полную версию (камера осматривает площадку) показываем при смене
@@ -51,6 +56,7 @@ type Screen =
   | { name: "scan" }
   | { name: "review"; candidates: LeadCandidate[]; fullText: string }
   | { name: "content" }
+  | { name: "pages" }
   | { name: "notes" }
   | { name: "stock" }
   | { name: "route" }
@@ -139,6 +145,19 @@ export default function App() {
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content
         .data as { screen?: string } | null;
+      // Кнопка в уведомлении о приезде: «Выполнено» или «Позвонить».
+      // Действие запоминаем — экран маршрута выполнит его, как только
+      // откроется и подгрузит заявки (обычно сразу).
+      const actionId = response.actionIdentifier;
+      if (actionId === "done" || actionId === "call") {
+        void queuePendingAction(actionId);
+        setScreen({ name: "route" });
+        return;
+      }
+      if (data?.screen === "route") {
+        setScreen({ name: "route" });
+        return;
+      }
       if (data?.screen === "reviews") {
         setScreen({ name: "reviews" });
       } else if (data?.screen === "chat") {
@@ -266,6 +285,7 @@ export default function App() {
     screen.name === "route" ||
     screen.name === "reviews" ||
     screen.name === "content" ||
+    screen.name === "pages" ||
     screen.name === "about";
   const activeTab =
     screen.name === "leads"
@@ -310,6 +330,9 @@ export default function App() {
         break;
       case "content":
         setScreen({ name: "content" });
+        break;
+      case "pages":
+        setScreen({ name: "pages" });
         break;
       default:
         setScreen({ name: "leads" });
@@ -375,7 +398,18 @@ export default function App() {
     content = (
       <View style={styles.root}>
         <StatusBar style="light" />
-        <ContentScreen token={token} onBack={() => setScreen({ name: "leads" })} />
+        <ContentScreen
+          token={token}
+          onBack={() => setScreen({ name: "leads" })}
+          onOpenPages={() => setScreen({ name: "pages" })}
+        />
+      </View>
+    );
+  } else if (screen.name === "pages") {
+    content = (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <PagesScreen token={token} onBack={() => setScreen({ name: "content" })} />
       </View>
     );
   } else if (screen.name === "notes") {

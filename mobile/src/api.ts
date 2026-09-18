@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { HomeContent } from "./content";
+import type { SitePage } from "./pages";
 
 export const API_BASE = "https://obzor71.ru";
 
@@ -395,6 +396,42 @@ export const api = {
   /** Удалить загруженное фото (вернуть стандартное из сборки). */
   deleteContentImage: (token: string, key: string) =>
     request(`/api/admin/content/image/${key}`, {
+      method: "DELETE",
+      token,
+    }) as Promise<{ ok: boolean }>,
+
+  // --- Дополнительные страницы сайта («Цены», «Акции» и т.п.) ---
+
+  /**
+   * Все страницы сайта, включая скрытые, — для конструктора в приложении.
+   * Сервер отдаёт их очищенными (sanitizePages), поэтому на экран можно
+   * класть ответ как есть.
+   */
+  getAdminPages: (token: string) =>
+    request("/api/admin/pages", { token }) as Promise<{ pages: SitePage[] }>,
+
+  /** Сохранить весь список страниц: сервер отвечает тем, что реально записал. */
+  saveAdminPages: (token: string, pages: SitePage[]) =>
+    request("/api/admin/pages", {
+      method: "PUT",
+      body: { pages },
+      token,
+    }) as Promise<{ ok: boolean; pages: SitePage[] }>,
+
+  /**
+   * Загрузить фото блока страницы (data-url сжатого jpeg/webp/png).
+   * Возвращает адрес вида /api/content/page-image/<id> — его и кладём в блок.
+   */
+  uploadPageImage: (token: string, dataUrl: string) =>
+    request("/api/admin/pages/image", {
+      method: "PUT",
+      body: { dataUrl },
+      token,
+    }) as Promise<{ url: string }>,
+
+  /** Удалить фото страницы с сервера (когда его убрали из блока). */
+  deletePageImage: (token: string, id: string) =>
+    request(`/api/admin/pages/image/${id}`, {
       method: "DELETE",
       token,
     }) as Promise<{ ok: boolean }>,

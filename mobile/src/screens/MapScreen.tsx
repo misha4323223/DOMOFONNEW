@@ -30,6 +30,7 @@ import {
 } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Linking,
   Modal,
   PermissionsAndroid,
@@ -37,12 +38,49 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { api, isNetworkError, type GeoPlanResult, type GeoRideRoute } from "../api";
 import { openPointInNavigator, openRouteInNavigator } from "../maps";
+import { callPhone, writeSms } from "../phone";
+import {
+  BASE_POINT_ID,
+  clearRideSession,
+  loadRideBase,
+  loadRideSession,
+  etaShortLabel,
+  messageForClient,
+  newRideSession,
+  rideStartedLabel,
+  rideSummary,
+  rideTotals,
+  saveRideBase,
+  saveRideSession,
+  withDistance,
+  type RideBase,
+  type RideSession,
+} from "../ride";
+import { MAP_HTML as RIDE_MAP_HTML } from "../mapHtml";
+import {
+  keepScreenAwake,
+  loadRideContext,
+  startRideTracking,
+  stopRideTracking,
+  updateRideTracking,
+  type RideTrackContext,
+} from "../rideTrack";
+import {
+  arrivalPhrase,
+  loadVoiceEnabled,
+  maneuverPhrase,
+  nextStopPhrase,
+  saveVoiceEnabled,
+  speak,
+  stopSpeaking,
+} from "../voice";
 import { colors } from "../theme";
 
 /** Встроенный браузер. null — в этой сборке APK его ещё нет. */
@@ -69,6 +107,13 @@ export interface MapStop {
   address: string;
   /** Город из заявки: уточняет поиск адреса. */
   city?: string;
+  /** Телефон клиента: в поездке виден и нажимается — сразу звонок. */
+  phone?: string;
+  /**
+   * У заявки есть расходники: закрывать её из шторки молча нельзя —
+   * там списание с остатка, мастер должен подтвердить.
+   */
+  hasParts?: boolean;
   /** Заявка уже выполнена. */
   done?: boolean;
 }
@@ -90,6 +135,11 @@ interface Props {
    * текущей становится следующая точка — карта уезжает к ней сама.
    */
   onComplete: (id: string) => void;
+  /**
+   * «Клиента нет дома»: точка уезжает в конец маршрута, поездка идёт дальше.
+   * Ничего не закрываем — заявка остаётся в работе.
+   */
+  onPostpone: (id: string) => void;
 }
 
 /**
@@ -120,7 +170,12 @@ const RIDE_MIN_AHEAD_METERS = 1500;
 /** Минимальная пауза между запросами к сервису маршрутов. */
 const RIDE_MIN_REQUEST_MS = 30_000;
 
-/** HTML-каркас карты. Данные приходят отдельно — через window.__setRoute. */
+/**
+ * УСТАРЕВШАЯ копия разметки карты. Рабочая разметка живёт в ../mapHtml
+ * (её подставляет MAP_SOURCE.html ниже): там же панель поездки с кнопками
+ * «Позвонить», «Выполнено» и «Клиента нет». Этот текст остался от прежней
+ * версии и больше нигде не используется — правьте ../mapHtml.
+ */
 const MAP_HTML = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -154,13 +209,15 @@ const MAP_HTML = `<!DOCTYPE html>
     border-radius: 14px; background: rgba(17,24,39,.94);
     border: 1px solid rgba(96,165,250,.45); box-shadow: 0 4px 14px rgba(0,0,0,.5); }
   .man.show { display: flex; }
-  .manArrow { flex: none; width: 40px; height: 40px; border-radius: 20px;
+  .manArrow { flex: none; width: 46px; height: 46px; border-radius: 23px;
     background: #2563eb; color: #fff; display: flex; align-items: center;
-    justify-content: center; font: 700 22px system-ui, -apple-system, sans-serif; }
+    justify-content: center; font: 700 26px system-ui, -apple-system, sans-serif; }
   .manBody { flex: 1; min-width: 0; }
-  .manDist { color: #f8fafc; font: 700 20px system-ui, -apple-system, sans-serif; }
-  .manAct { color: #cbd5e1; font: 13px system-ui, -apple-system, sans-serif;
+  .manDist { color: #f8fafc; font: 700 23px system-ui, -apple-system, sans-serif; }
+  .manAct { color: #e2e8f0; font: 14px system-ui, -apple-system, sans-serif;
     margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .manNext { color: #93c5fd; font: 12.5px system-ui, -apple-system, sans-serif;
+    margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #boot { position: absolute; left: 0; right: 0; top: 0; bottom: 0; z-index: 999;
     display: flex; align-items: center; justify-content: center; padding: 24px;
     color: #9ca3af; font: 14px system-ui, -apple-system, sans-serif; text-align: center; }
@@ -177,6 +234,7 @@ const MAP_HTML = `<!DOCTYPE html>
   <div class="manBody">
     <div class="manDist" id="manDist"></div>
     <div class="manAct" id="manAct"></div>
+    <div class="manNext" id="manNext"></div>
   </div>
 </div>
 <div id="boot">Загружаю карту\u2026</div>
@@ -359,13 +417,14 @@ const MAP_HTML = `<!DOCTYPE html>
       manKey = '';
       return;
     }
-    var next = null;
+    var next = null, nextIdx = -1;
     for (var i = 0; i < MAN.length; i += 1) {
       var left = PATH.cum[MAN[i].idx] - PATH.cum[lastIdx];
       // Поворот позади или мы стоим ровно на нём — объявляем следующий.
       if (left < 0) continue;
       if (left < 25 && i < MAN.length - 1) continue;
       next = { left: left + MAN[i].gap, text: MAN[i].text, street: MAN[i].street };
+      nextIdx = i;
       break;
     }
     if (!next) {
@@ -373,7 +432,16 @@ const MAP_HTML = `<!DOCTYPE html>
       manKey = '';
       return;
     }
-    var key = next.text + '|' + next.street + '|' + Math.round(next.left / 25);
+    // Что делать сразу после ближайшего поворота — «затем направо».
+    // В незнакомом месте второй манёвр важнее, чем метры до первого;
+    // но если между поворотами больше двух километров, подсказка мешает.
+    var after = null;
+    if (nextIdx >= 0 && nextIdx + 1 < MAN.length) {
+      var between = PATH.cum[MAN[nextIdx + 1].idx] - PATH.cum[MAN[nextIdx].idx];
+      if (between < 2500) after = MAN[nextIdx + 1];
+    }
+    var key = next.text + '|' + next.street + '|' + Math.round(next.left / 25) +
+      '|' + (after ? after.text + after.street : '');
     if (key !== manKey) {
       manKey = key;
       var dist = formatMeters(next.left);
@@ -382,6 +450,10 @@ const MAP_HTML = `<!DOCTYPE html>
         dist === 'сейчас' ? 'Сейчас' : 'Через ' + dist;
       document.getElementById('manAct').textContent =
         next.street ? next.text + ' \u00b7 ' + next.street : next.text;
+      document.getElementById('manNext').textContent = after
+        ? 'затем ' + arrowFor(after.text) + ' ' + after.text +
+          (after.street ? ' \u00b7 ' + after.street : '')
+        : '';
     }
     box.className = 'man show';
   }
@@ -642,6 +714,14 @@ const MAP_HTML = `<!DOCTYPE html>
 const MAP_BASE_URL = "https://obzor71.ru/";
 const MAP_SOURCE = { html: MAP_HTML, baseUrl: MAP_BASE_URL };
 
+/**
+ * Разметку карты держим в отдельном модуле (../mapHtml) — там же живёт панель
+ * поездки: «Позвонить», «Клиента нет», «Выполнено» прямо на карте, чтобы руки
+ * водителя не искали кнопки на телефоне. Подменяем HTML у того же объекта:
+ * новый объект заставил бы встроенный браузер перезагрузить страницу.
+ */
+MAP_SOURCE.html = RIDE_MAP_HTML;
+
 function safeJson(value: unknown): string {
   // Ничего лишнего в скрипт не попадёт: кавычки и угловые скобки экранируем.
   return JSON.stringify(value)
@@ -714,6 +794,7 @@ export function MapScreen({
   onOpenLead,
   onNavigateByAddress,
   onComplete,
+  onPostpone,
 }: Props) {
   const [geo, setGeo] = useState<GeoPlanResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -751,6 +832,126 @@ export function MapScreen({
   const roadRef = useRef<{ at: number; lat: number; lon: number } | null>(null);
   /** Номер последнего запроса дороги: ответы на старые не применяем. */
   const roadReqRef = useRef(0);
+  /** Поездка: пробег и закрытые точки за смену — живёт на телефоне. */
+  const [session, setSession] = useState<RideSession | null>(null);
+  /** Незаконченная поездка с прошлого запуска — предлагаем продолжить. */
+  const [resumeOffer, setResumeOffer] = useState<RideSession | null>(null);
+  /** База: куда возвращаться после маршрута. */
+  const [base, setBase] = useState<RideBase>({ address: "", lat: null, lon: null });
+  const [baseOpen, setBaseOpen] = useState(false);
+  const [baseDraft, setBaseDraft] = useState("");
+  const [baseBusy, setBaseBusy] = useState(false);
+  const [baseError, setBaseError] = useState<string | null>(null);
+  /** Приехали и стоим на месте — карточка сама предлагает отметить точку. */
+  const [arrivalOffer, setArrivalOffer] = useState(false);
+  /** Голосовые подсказки: по умолчанию включены, выключаются в панели. */
+  const [voiceOn, setVoiceOn] = useState(true);
+  /** Предыдущее положение — по нему считаем пробег за смену. */
+  const lastFixRef = useRef<{ lat: number; lon: number } | null>(null);
+  /** Когда поездку записывали на диск в последний раз (не чаще раза в 15 с). */
+  const sessionSaveRef = useRef(0);
+  /** Стоянка: с какого места и времени стоим. */
+  const standRef = useRef<{ lat: number; lon: number; since: number } | null>(null);
+  /** Для какой точки уже предлагали отметить выполнение. */
+  const offeredForRef = useRef<string | null>(null);
+  /**
+   * Свежие действия поездки для кнопок внутри карты. Карта присылает только
+   * «нажали такую-то кнопку», а что делать, решает экран — так панель на карте
+   * не знает про состояние заявок и не устаревает.
+   */
+  const rideActionsRef = useRef<{
+    done: () => void;
+    postpone: () => void;
+    call: () => void;
+    sms: () => void;
+    base: () => void;
+    say: (text: string) => void;
+    voice: () => void;
+  } | null>(null);
+
+  // Поездка и база лежат на телефоне: закрыли приложение — смена не потерялась.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [saved, savedBase] = await Promise.all([loadRideSession(), loadRideBase()]);
+      if (cancelled) return;
+      setBase(savedBase);
+      if (saved) setResumeOffer(saved);
+
+      // Адрес базы сохранили без интернета — координаты ищем при первой
+      // возможности и запоминаем: дальше расстояние до дома считаем сами.
+      if (savedBase.address && (savedBase.lat === null || savedBase.lon === null)) {
+        try {
+          const data = await api.geoPlan(token, [
+            { id: BASE_POINT_ID, address: savedBase.address },
+          ]);
+          const stop = data?.stops?.find((s) => s.id === BASE_POINT_ID);
+          if (!cancelled && stop && stop.lat !== null && stop.lon !== null) {
+            const resolved: RideBase = {
+              address: savedBase.address,
+              lat: stop.lat,
+              lon: stop.lon,
+            };
+            setBase(resolved);
+            await saveRideBase(resolved);
+          }
+        } catch {
+          // Нет связи — попробуем в следующий раз, база не сломалась
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  // Пробег за смену: считаем по своему положению, телефон не дёргаем зря.
+  useEffect(() => {
+    if (!riding || !me) return;
+    const prev = lastFixRef.current;
+    lastFixRef.current = { lat: me.lat, lon: me.lon };
+    if (!prev) return;
+    const moved = metersBetween(prev, me);
+    setSession((current) => withDistance(current ?? newRideSession(), prev, me, moved));
+  }, [riding, me]);
+
+  // Запись поездки на телефон — раз в 15 секунд (частые записи не нужны).
+  useEffect(() => {
+    if (!session) return;
+    const now = Date.now();
+    if (now - sessionSaveRef.current < 15_000) return;
+    sessionSaveRef.current = now;
+    void saveRideSession(session);
+  }, [session]);
+
+  /**
+   * Стоим на месте у точки — предлагаем отметить выполнение.
+   *
+   * У двери руки заняты: приехал, стоит полминуты — карточка сама предлагает
+   * «Выполнено» / «Клиента нет». Один раз на точку, дальше не надоедаем.
+   */
+  useEffect(() => {
+    if (!riding || !me) return;
+    const stand = standRef.current;
+    if (!stand || metersBetween(stand, me) > 40) {
+      standRef.current = { lat: me.lat, lon: me.lon, since: Date.now() };
+      return;
+    }
+    if (Date.now() - stand.since < 40_000) return;
+    if (ride.dist === null || ride.dist > 200) return;
+    const stopId = currentId ?? "";
+    if (offeredForRef.current === stopId) return;
+    offeredForRef.current = stopId;
+    setArrivalOffer(true);
+  }, [riding, me, ride.dist, currentId]);
+
+  // Перешли к следующей точке — прошлое предложение больше не показываем,
+  // а стоянку отсчитываем заново.
+  useEffect(() => {
+    setArrivalOffer(false);
+    standRef.current = null;
+    offeredForRef.current = null;
+  }, [currentId]);
 
   // Отпечаток списка точек: меняется адрес или порядок — маршрут пересчитываем.
   const signature = useMemo(
@@ -928,8 +1129,13 @@ export function MapScreen({
     // не появится вообще, пока машина движется.
     roadReqRef.current += 1;
     const reqId = roadReqRef.current;
+    // База (дом) — последним пунктом: в поездке видно и остаток до неё.
+    const home =
+      base.lat !== null && base.lon !== null
+        ? [{ id: BASE_POINT_ID, lat: base.lat, lon: base.lon }]
+        : [];
     void api
-      .rideRoute(token, me, aheadStops)
+      .rideRoute(token, me, [...aheadStops, ...home])
       .then((data) => {
         if (roadReqRef.current !== reqId) return;
         setRoad(data);
@@ -939,7 +1145,70 @@ export function MapScreen({
         // Не получилось — оставляем прежнюю линию и говорим об этом честно.
         if (roadReqRef.current === reqId) setRoadFailed(true);
       });
-  }, [riding, me, rideTick, aheadStops, token, pathInfo]);
+  }, [riding, me, rideTick, aheadStops, base.lat, base.lon, token, pathInfo]);
+
+  /** Переключить голос: за рулём он ведёт, а в шумном подъезде мешает. */
+  const toggleVoice = useCallback(() => {
+    const next = !voiceOn;
+    setVoiceOn(next);
+    void saveVoiceEnabled(next);
+    if (next) speak("Голос включён", true);
+    else stopSpeaking();
+  }, [voiceOn]);
+
+  // Поездка закончилась — недоговорённую подсказку обрываем: в пустой машине
+  // голос из телефона только пугает.
+  useEffect(() => {
+    if (!riding) stopSpeaking();
+  }, [riding]);
+
+  /**
+   * Действия кнопок внутри карты. Обновляем их на каждом рендере: карта
+   * присылает только нажатие, а что именно делать — решает экран, поэтому
+   * обработчики должны быть самыми свежими.
+   */
+  useEffect(() => {
+    rideActionsRef.current = {
+      done: () => completeCurrent(),
+      postpone: () => confirmPostpone(),
+      call: () => callPhone(currentStop?.phone ?? ""),
+      sms: () => writeSms(currentStop?.phone ?? "", messageForClient(etaSeconds)),
+      base: () => void openBaseInNavigator(),
+      say: (text: string) => speak(text, voiceOn),
+      voice: () => toggleVoice(),
+    };
+  });
+
+  // Незаконченная поездка с прошлого раза: спрашиваем один раз на запуск —
+  // продолжать смену тем же счётом или закрыть итоги.
+  useEffect(() => {
+    if (riding || !resumeOffer) return;
+    const saved = resumeOffer;
+    Alert.alert(
+      `Незаконченная поездка ${rideStartedLabel(saved)}`,
+      `Смена: ${rideSummary(saved)}. Продолжить с этого места?`,
+      [
+        { text: "Продолжить", onPress: () => resumeRide() },
+        { text: "Закончить смену", style: "destructive", onPress: () => finishSession() },
+        { text: "Позже", style: "cancel" },
+      ],
+    );
+  }, [riding, resumeOffer]);
+
+  // Приехали и стоим на месте — предлагаем закрыть точку сами.
+  useEffect(() => {
+    if (!riding || !arrivalOffer) return;
+    setArrivalOffer(false);
+    Alert.alert(
+      "Вы на месте",
+      currentStop ? currentStop.address || "Точка маршрута" : "Точка маршрута",
+      [
+        { text: "Выполнено", onPress: () => completeCurrent() },
+        { text: "Клиента нет", onPress: () => confirmPostpone() },
+        { text: "Позже", style: "cancel" },
+      ],
+    );
+  }, [riding, arrivalOffer, currentStop]);
 
   /** Участок до текущей точки — из него берём «осталось» и время прибытия. */
   const currentLeg = useMemo(() => {
@@ -958,11 +1227,158 @@ export function MapScreen({
     return Math.round(currentLeg.duration * share);
   }, [currentLeg, ride.ahead]);
 
+  // Голос настроен на телефоне: кто не хочет подсказок, тот выключил их однажды.
+  useEffect(() => {
+    void loadVoiceEnabled().then(setVoiceOn);
+  }, []);
+
+  // Новая текущая точка (начали поездку или закрыли заявку) — объявляем
+  // голосом, сколько до неё: за рулём в экран не смотрят.
+  const announcedStopRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!riding || !currentStop) return;
+    if (announcedStopRef.current === currentStop.id) return;
+    announcedStopRef.current = currentStop.id;
+    const left = currentLeg?.distance ?? ride.ahead ?? null;
+    speak(nextStopPhrase(currentStop.address || currentStop.name, left), voiceOn);
+  }, [riding, currentStop, currentLeg, ride.ahead, voiceOn]);
+
+  // Подъехали — говорим об этом один раз на точку (карта может мигнуть
+  // «на месте / не на месте» на пару метров, повторять не нужно).
+  const saidArrivalRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!riding || !ride.arrived || !currentStop) return;
+    if (saidArrivalRef.current === currentStop.id) return;
+    saidArrivalRef.current = currentStop.id;
+    speak(arrivalPhrase(), voiceOn);
+  }, [riding, ride.arrived, currentStop, voiceOn]);
+
+  /**
+   * Поездка в фоне. Карта берёт положение из встроенного браузера и живёт,
+   * пока приложение на экране; чтобы поездка не замирала с погашенным экраном,
+   * поднимаем службу определения и сообщаем ей, к какой точке едем.
+   */
+  const trackContext = useMemo<RideTrackContext | null>(
+    () =>
+      currentStop
+        ? {
+            stopId: currentStop.id,
+            address: currentStop.address || currentStop.name,
+            phone: currentStop.phone ?? "",
+            lat: currentCoords?.lat ?? null,
+            lon: currentCoords?.lon ?? null,
+            hasParts: currentStop.hasParts === true,
+          }
+        : null,
+    [currentStop, currentCoords],
+  );
+
+  // Начали поездку — включаем службу и экран «не гаснет». Разрешение на фон
+  // человек может не дать: тогда честно предупреждаем, что поездка живёт
+  // только на открытом экране, и продолжаем как раньше.
+  useEffect(() => {
+    if (!riding) return;
+    let cancelled = false;
+    void (async () => {
+      const context = trackContext ?? (await loadRideContext());
+      if (!context || cancelled) return;
+      const status = await startRideTracking(context);
+      if (cancelled) {
+        await stopRideTracking();
+        return;
+      }
+      keepScreenAwake(true);
+      if (status === "foreground-only") {
+        Alert.alert(
+          "Поездка будет видна только на экране",
+          "Разрешите доступ к геопозиции «Всегда»: тогда приложение продолжит вести маршрут с погашенным экраном и сообщит, когда вы подъехали.",
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [riding]);
+
+  // Перешли к следующей точке — служба узнаёт новый адрес, старое сообщение
+  // о приезде снимается (оно было про прошлую заявку).
+  useEffect(() => {
+    if (!riding || !trackContext) return;
+    void updateRideTracking(trackContext);
+  }, [riding, trackContext]);
+
+  // Поездка закончилась (или экран карты закрыли) — гасим службу, экран
+  // снова гаснет как обычно, уведомления убираем.
+  useEffect(() => {
+    if (riding) return;
+    keepScreenAwake(false);
+    void stopRideTracking();
+  }, [riding]);
+
+  /**
+   * Панель поездки, которую рисует сама карта. Так кнопки «Позвонить»,
+   * «Выполнено» и «Клиента нет» и сводка («остаток», «домой», «смена»)
+   * всегда под рукой, не закрывая дорогу.
+   */
+  const rideHud = useMemo(() => {
+    const totals = rideTotals(road);
+    const home = totals.home;
+    const phone = currentStop?.phone ?? "";
+    const total = [
+      road && totals.work.distance > 0
+        ? `весь остаток ${formatDistance(totals.work.distance)} · ${formatDuration(
+            totals.work.duration,
+          )} · закончу ~${formatClock(totals.work.duration)}`
+        : "",
+      home ? `🏠 домой ${formatDistance(home.distance)} · ${formatDuration(home.duration)}` : "",
+      session ? `смена: ${rideSummary(session)}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return {
+      address: currentStop
+        ? `№${currentIndex + 1} · ${currentStop.address || "адрес не указан"}`
+        : "",
+      meta: ride.arrived
+        ? "Вы на месте — отмечайте выполнение"
+        : ride.ahead !== null && etaSeconds !== null
+          ? `до точки ${formatDistance(ride.ahead)} · ${formatDuration(
+              etaSeconds,
+            )} · буду ~${formatClock(etaSeconds)}`
+          : "",
+      total,
+      phone,
+      sms: phone ? `Напишу: ${etaShortLabel(etaSeconds)}` : "",
+      // Кнопку «Домой» показываем только когда база найдена на карте.
+      home: base.lat !== null && base.lon !== null,
+      // Состояние голоса — чтобы в панели было видно «говорит / молчит».
+      voice: voiceOn,
+    };
+  }, [
+    road,
+    currentStop,
+    currentIndex,
+    ride.arrived,
+    ride.ahead,
+    etaSeconds,
+    session,
+    base,
+    voiceOn,
+  ]);
+
   // Обновляем карту без перезагрузки страницы: маршрут перестраивается на месте.
   useEffect(() => {
     if (!ready || !webRef.current) return;
     webRef.current.injectJavaScript(`window.__setRoute(${safeJson(payload)}); true;`);
   }, [ready, payload]);
+
+  // Панель поездки внутри карты — отдельным сообщением: сводка меняется на
+  // каждом обновлении положения, а перерисовывать из-за неё всю карту (метки,
+  // линии) незачем — от этого карта дёргалась бы на ровном месте.
+  useEffect(() => {
+    if (!ready || !webRef.current) return;
+    webRef.current.injectJavaScript(`window.__hud(${safeJson(rideHud)}); true;`);
+  }, [ready, rideHud]);
 
   // Режим поездки: карта начинает следить за машиной и считать расстояние.
   useEffect(() => {
@@ -970,10 +1386,24 @@ export function MapScreen({
     webRef.current.injectJavaScript(`window.__ride(${riding ? "true" : "false"}); true;`);
   }, [ready, riding]);
 
-  // Маршрут закончился (все точки выполнены) — поездка закрывается сама.
+  // Маршрут закрыт (все точки выполнены) — поездка заканчивается сама,
+  // и мы показываем итоги смены: сколько точек и километров за смену.
   useEffect(() => {
-    if (riding && !currentId) setRiding(false);
-  }, [riding, currentId]);
+    if (!riding || currentId) return;
+    setRiding(false);
+    if (!session) return;
+    const done = session;
+    Alert.alert("Маршрут закрыт", `Смена: ${rideSummary(done)}. Заявок больше нет — можно ехать домой.`, [
+      {
+        text: "Готово",
+        onPress: () => {
+          void clearRideSession();
+          setSession(null);
+          setResumeOffer(null);
+        },
+      },
+    ]);
+  }, [riding, currentId, session]);
 
   // Карта вообще молчит о геопозиции (ни успеха, ни ошибки) — значит, сигнала
   // нет. Ждём двадцать секунд и говорим это человеку, а не держим «определяю…».
@@ -1011,6 +1441,7 @@ export function MapScreen({
     if (!parsed || typeof parsed !== "object") return;
     const data = parsed as {
       type?: string;
+      action?: string;
       lat?: number | null;
       lon?: number | null;
       dist?: number | null;
@@ -1018,7 +1449,34 @@ export function MapScreen({
       arrived?: boolean;
       status?: string;
       code?: number | null;
+      nav?: { text?: string; street?: string; meters?: number };
     };
+    if (data.type === "nav") {
+      // Карта сама решает, когда молвить: метры до поворота она считает по
+      // загруженной линии. Наша задача — сказать это человеческими словами.
+      const nav = data.nav;
+      if (!nav || typeof nav.meters !== "number") return;
+      const phrase = maneuverPhrase(
+        typeof nav.text === "string" ? nav.text : "прямо",
+        typeof nav.street === "string" ? nav.street : "",
+        nav.meters,
+      );
+      rideActionsRef.current?.say(phrase);
+      return;
+    }
+    if (data.type === "action") {
+      // Нажали кнопку в панели поездки на карте: звонок, сообщение клиенту,
+      // «Выполнено», «Клиента нет». Делает всё экран — самыми свежими
+      // обработчиками (rideActionsRef), чтобы карта не устаревала.
+      const actions = rideActionsRef.current;
+      if (!actions) return;
+      if (data.action === "done") actions.done();
+      else if (data.action === "postpone") actions.postpone();
+      else if (data.action === "call") actions.call();
+      else if (data.action === "sms") actions.sms();
+      else if (data.action === "base") actions.base();
+      return;
+    }
     if (data.type === "geo") {
       // 1 — доступ запрещён, 2 — положение недоступно, 3 — нет сигнала.
       const code = typeof data.code === "number" ? data.code : 0;
@@ -1047,15 +1505,61 @@ export function MapScreen({
   const startRide = useCallback(() => {
     setRide({ dist: null, ahead: null, arrived: false });
     roadRef.current = null;
+    // Новая поездка — новый счётчик: итоги смены считаем с нуля.
+    const fresh = newRideSession();
+    setSession(fresh);
+    sessionSaveRef.current = Date.now();
+    void saveRideSession(fresh);
+    setResumeOffer(null);
+    lastFixRef.current = me ? { lat: me.lat, lon: me.lon } : null;
     setRiding(true);
-  }, []);
+  }, [me]);
 
+  /**
+   * Поездка уезжает в «паузу»: линия убирается, но смена не теряется —
+   * внизу остаётся «Продолжить поездку» с пробегом и числом закрытых точек.
+   */
   const stopRide = useCallback(() => {
     roadRef.current = null;
     setRoad(null);
     setRoadFailed(false);
+    setArrivalOffer(false);
     setRiding(false);
-  }, []);
+    if (session) {
+      void saveRideSession(session);
+      setResumeOffer(session);
+    }
+  }, [session]);
+
+  /** Продолжить прерванную поездку: пробег и счётчик точек не теряются. */
+  const resumeRide = useCallback(() => {
+    if (resumeOffer) setSession(resumeOffer);
+    setResumeOffer(null);
+    setRide({ dist: null, ahead: null, arrived: false });
+    roadRef.current = null;
+    lastFixRef.current = me ? { lat: me.lat, lon: me.lon } : null;
+    standRef.current = null;
+    offeredForRef.current = null;
+    setRiding(true);
+  }, [resumeOffer, me]);
+
+  /** Закончить смену: обнулить итоги (с подтверждением — цифры жалко). */
+  const finishSession = useCallback(() => {
+    const summary = session ? rideSummary(session) : "пусто";
+    Alert.alert("Закончить смену?", `Итоги: ${summary}. Счётчик начнётся с нуля.`, [
+      { text: "Отмена", style: "cancel" },
+      {
+        text: "Закончить",
+        style: "destructive",
+        onPress: () => {
+          void clearRideSession();
+          setSession(null);
+          setResumeOffer(null);
+          lastFixRef.current = null;
+        },
+      },
+    ]);
+  }, [session]);
 
   /**
    * «Выполнено» в поездке: закрываем текущую заявку тем же путём, что и в
@@ -1065,17 +1569,127 @@ export function MapScreen({
   const completeCurrent = useCallback(() => {
     if (!currentStop) return;
     setRide({ dist: null, ahead: null, arrived: false });
+    setArrivalOffer(false);
+    setSession((current) => {
+      const base = current ?? newRideSession();
+      const next: RideSession = {
+        ...base,
+        completed: base.completed + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      sessionSaveRef.current = Date.now();
+      void saveRideSession(next);
+      return next;
+    });
     onComplete(currentStop.id);
   }, [currentStop, onComplete]);
 
   /**
+   * «Клиента нет дома»: точка уезжает в конец маршрута, заявка не закрывается.
+   * Сначала спрашиваем — на ходу легко промахнуться по кнопке.
+   */
+  const confirmPostpone = useCallback(() => {
+    if (!currentStop) return;
+    const id = currentStop.id;
+    Alert.alert(
+      "Клиента нет дома?",
+      "Точка уедет в конец маршрута, заявка останется в работе — поедем к следующей.",
+      [
+        { text: "Отмена", style: "cancel" },
+        {
+          text: "В конец маршрута",
+          onPress: () => {
+            setRide({ dist: null, ahead: null, arrived: false });
+            setArrivalOffer(false);
+            standRef.current = null;
+            offeredForRef.current = null;
+            onPostpone(id);
+          },
+        },
+      ],
+    );
+  }, [currentStop, onPostpone]);
+
+  /** База: адрес последним пунктом — в поездке видно, сколько осталось домой. */
+  const basePoint = useMemo(
+    () =>
+      base.lat !== null && base.lon !== null
+        ? { id: BASE_POINT_ID, lat: base.lat, lon: base.lon }
+        : null,
+    [base],
+  );
+
+  const openBaseInNavigator = useCallback(async () => {
+    if (base.lat === null || base.lon === null) {
+      setBaseOpen(true);
+      return;
+    }
+    await openPointInNavigator(base.lat, base.lon, base.address || "База");
+  }, [base]);
+
+  /**
+   * Найти адрес базы на карте и запомнить. Без интернета адрес всё равно
+   * сохраняем: координаты досчитаем при первой возможности (см. загрузку).
+   */
+  const saveBase = useCallback(async () => {
+    const address = baseDraft.trim();
+    if (!address) {
+      setBaseError("Введите адрес базы");
+      return;
+    }
+    setBaseBusy(true);
+    setBaseError(null);
+    try {
+      const data: GeoPlanResult = await api.geoPlan(token, [
+        { id: BASE_POINT_ID, address },
+      ]);
+      const stop = data?.stops?.find((s) => s.id === BASE_POINT_ID);
+      const lat = typeof stop?.lat === "number" ? stop.lat : null;
+      const lon = typeof stop?.lon === "number" ? stop.lon : null;
+      const next: RideBase = { address, lat, lon };
+      setBase(next);
+      await saveRideBase(next);
+      setBaseOpen(false);
+      if (lat === null) {
+        Alert.alert(
+          "Адрес не нашёлся на карте",
+          "База сохранена, но точку найти не удалось — расстояние до неё считать не получится. Проверьте адрес (город, улица, дом).",
+        );
+      }
+    } catch (e) {
+      // Связи нет — сохраняем хотя бы адрес, иначе человек потеряет введённое.
+      const fallback: RideBase = { address, lat: null, lon: null };
+      setBase(fallback);
+      await saveRideBase(fallback);
+      setBaseOpen(false);
+      Alert.alert(
+        "Нет связи",
+        isNetworkError(e)
+          ? "Адрес базы сохранён. Точку на карте найдём, когда появится интернет — откройте окно базы и сохраните ещё раз."
+          : "Адрес сохранён, но точку найти не удалось. Попробуйте ещё раз чуть позже.",
+      );
+    } finally {
+      setBaseBusy(false);
+    }
+  }, [baseDraft, token]);
+
+  /**
    * Весь оставшийся маршрут — в Яндекс Карты: он ведёт голосом от точки
-   * к точке, и открывать каждую заявку руками не нужно.
+   * к точке, и открывать каждую заявку руками не нужно. База — в конце.
    */
   const ridePoints = useMemo(
-    () => aheadStops.map((stop) => ({ lat: stop.lat, lon: stop.lon })),
-    [aheadStops],
+    () =>
+      aheadStops
+        .map((stop) => ({ lat: stop.lat, lon: stop.lon }))
+        .concat(basePoint ? [{ lat: basePoint.lat, lon: basePoint.lon }] : []),
+    [aheadStops, basePoint],
   );
+
+  /** Итоги дороги: работа отдельно, дорога домой отдельно. */
+  const totals = useMemo(() => rideTotals(road), [road]);
+
+  /** Подпись кнопки SMS: видно, что уйдёт клиенту, ещё до нажатия. */
+  const smsLabel = useMemo(() => etaShortLabel(etaSeconds), [etaSeconds]);
 
   const handleWholeRoute = useCallback(async () => {
     if (ridePoints.length === 0) return;

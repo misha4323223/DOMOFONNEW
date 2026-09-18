@@ -3,6 +3,7 @@ import {
   Animated,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -21,6 +22,7 @@ export type NavTarget =
   | "route"
   | "reviews"
   | "content"
+  | "pages"
   | "scan"
   | "add"
   | "about";
@@ -60,6 +62,7 @@ const MORE_ITEMS: {
   { target: "stock", iconName: "cube-outline", label: "Расходники" },
   { target: "reviews", iconName: "star-outline", label: "Отзывы" },
   { target: "content", iconName: "globe-outline", label: "Сайт" },
+  { target: "pages", iconName: "layers-outline", label: "Страницы сайта" },
   { target: "about", iconName: "information-circle-outline", label: "О приложении" },
 ];
 
@@ -178,47 +181,55 @@ export function BottomNav({ active, onNavigate, onLogout, chatUnread = 0 }: Prop
             ]}
           >
             <View style={styles.sheetHandle} />
-            <Text style={styles.sheetTitle}>Ещё</Text>
-
-            <View style={styles.sheetList}>
-              {MORE_ITEMS.map((item) => (
-                <Pressable
-                  key={item.target}
-                  onPress={() => go(item.target)}
-                  style={({ pressed }) => [
-                    styles.sheetItem,
-                    pressed && styles.sheetItemPressed,
-                  ]}
-                >
-                  <View style={styles.sheetItemIcon}>
-                    <Ionicons
-                      name={item.iconName}
-                      size={22}
-                      color={item.tint ?? colors.text}
-                    />
-                  </View>
-                  <Text style={styles.sheetItemLabel}>{item.label}</Text>
-                </Pressable>
-              ))}
-            </View>
-
-            <View style={styles.sheetDivider} />
-
-            <Pressable
-              onPress={() => {
-                closeSheet();
-                onLogout();
-              }}
-              style={({ pressed }) => [
-                styles.sheetItem,
-                pressed && styles.sheetItemPressed,
-              ]}
+            {/* Пунктов в шторке много (подписка страниц, сайт, расходники…),
+                на невысоких экранах список прокручивается, а не обрезается. */}
+            <ScrollView
+              style={styles.sheetScroll}
+              contentContainerStyle={styles.sheetScrollContent}
+              showsVerticalScrollIndicator={false}
             >
-              <View style={[styles.sheetItemIcon, styles.logoutIcon]}>
-                <Ionicons name="log-out-outline" size={20} color={colors.destructive} />
+              <Text style={styles.sheetTitle}>Ещё</Text>
+
+              <View style={styles.sheetList}>
+                {MORE_ITEMS.map((item) => (
+                  <Pressable
+                    key={item.target}
+                    onPress={() => go(item.target)}
+                    style={({ pressed }) => [
+                      styles.sheetItem,
+                      pressed && styles.sheetItemPressed,
+                    ]}
+                  >
+                    <View style={styles.sheetItemIcon}>
+                      <Ionicons
+                        name={item.iconName}
+                        size={22}
+                        color={item.tint ?? colors.text}
+                      />
+                    </View>
+                    <Text style={styles.sheetItemLabel}>{item.label}</Text>
+                  </Pressable>
+                ))}
               </View>
-              <Text style={styles.logoutLabel}>Выйти</Text>
-            </Pressable>
+
+              <View style={styles.sheetDivider} />
+
+              <Pressable
+                onPress={() => {
+                  closeSheet();
+                  onLogout();
+                }}
+                style={({ pressed }) => [
+                  styles.sheetItem,
+                  pressed && styles.sheetItemPressed,
+                ]}
+              >
+                <View style={[styles.sheetItemIcon, styles.logoutIcon]}>
+                  <Ionicons name="log-out-outline" size={20} color={colors.destructive} />
+                </View>
+                <Text style={styles.logoutLabel}>Выйти</Text>
+              </Pressable>
+            </ScrollView>
           </Animated.View>
         </View>
       </Modal>
@@ -320,7 +331,11 @@ const styles = StyleSheet.create({
     borderColor: colors.cardBorder,
     paddingHorizontal: 16,
     paddingTop: 10,
+    // Шторка не занимает весь экран: список внутри прокручивается
+    maxHeight: "88%",
   },
+  sheetScroll: { flexGrow: 0 },
+  sheetScrollContent: { paddingBottom: 4 },
   sheetHandle: {
     alignSelf: "center",
     width: 40,

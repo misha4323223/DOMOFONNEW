@@ -34,6 +34,8 @@ import { colors } from "../theme";
 interface Props {
   token: string;
   onBack: () => void;
+  /** Перейти к конструктору своих страниц («Цены», «Акции», …). */
+  onOpenPages?: () => void;
 }
 
 // --- Описание полей каждой секции (ключи совпадают с HomeContent) ---
@@ -258,7 +260,7 @@ function moveItem<T>(list: T[], index: number, delta: -1 | 1): T[] {
   return next;
 }
 
-export function ContentScreen({ token, onBack }: Props) {
+export function ContentScreen({ token, onBack, onOpenPages }: Props) {
   const [draft, setDraft] = useState<HomeContent>(() => cloneContent(DEFAULT_CONTENT));
   const [activeSection, setActiveSection] = useState<string>(HOME_SECTIONS[0].key);
   const [loading, setLoading] = useState(true);
@@ -671,7 +673,13 @@ export function ContentScreen({ token, onBack }: Props) {
           <Text style={styles.back}>← Назад</Text>
         </Pressable>
         <Text style={styles.headerTitle}>Контент сайта</Text>
-        <View style={{ width: 64 }} />
+        {onOpenPages ? (
+          <Pressable onPress={onOpenPages} hitSlop={10}>
+            <Text style={styles.headerLink}>Страницы →</Text>
+          </Pressable>
+        ) : (
+          <View style={{ width: 64 }} />
+        )}
       </View>
 
       {/* Плашка: изменения ждут интернета */}
@@ -836,6 +844,12 @@ const styles = StyleSheet.create({
   headerTitle: {
     color: colors.text,
     fontSize: 17,
+    fontWeight: "700",
+  },
+  // Ссылка «Страницы →» в шапке — переход к конструктору страниц сайта
+  headerLink: {
+    color: colors.primary,
+    fontSize: 13.5,
     fontWeight: "700",
   },
   offlineBanner: {

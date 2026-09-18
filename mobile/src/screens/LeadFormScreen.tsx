@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -293,11 +294,34 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
     };
   }, [lead, token]);
 
-  const save = async () => {
-    if (!name.trim() || !phone.trim() || !address.trim()) {
-      setError(isCityField ? "Заполните город, телефон и адрес" : "Заполните имя, телефон и адрес");
+  /**
+   * Кнопка «Сохранить».
+   *
+   * Телефон не обязателен: заявку можно завести без номера (клиент подошёл
+   * лично или номер узнаем позже). Но без него позвонить из заявки нельзя,
+   * поэтому сначала предупреждаем — и, если подтвердили, сохраняем.
+   */
+  const save = () => {
+    if (!name.trim() || !address.trim()) {
+      setError(isCityField ? "Заполните город и адрес" : "Заполните имя и адрес");
       return;
     }
+    if (!phone.trim()) {
+      Alert.alert(
+        "Заявка без телефона",
+        "Номер не указан: позвонить клиенту из заявки не получится, а повторные " +
+          "обращения будем искать по адресу. Сохранить так?",
+        [
+          { text: "Вернуться", style: "cancel" },
+          { text: "Сохранить без телефона", onPress: () => void saveLead() },
+        ],
+      );
+      return;
+    }
+    void saveLead();
+  };
+
+  const saveLead = async () => {
     setBusy(true);
     setError(null);
     const body: LeadInput = {
@@ -493,6 +517,13 @@ export function LeadFormScreen({ token, lead, onSaved, onBack }: Props) {
             </Pressable>
           ) : null}
         </View>
+        {/* Телефон не обязателен — предупреждаем, но сохранить не мешаем */}
+        {!phone.trim() ? (
+          <Text style={styles.phoneWarning}>
+            ⚠ Без телефона: позвонить клиенту не получится, повторные обращения
+            найдём по адресу
+          </Text>
+        ) : null}
 
         <Text style={styles.label}>Услуга</Text>
         <View style={styles.services}>
@@ -1220,6 +1251,14 @@ const styles = StyleSheet.create({
     color: colors.destructive,
     fontSize: 14,
     marginTop: 8,
+  },
+  // Предупреждение под пустым телефоном: сохранить не мешает, но говорит,
+  // что позвонить из такой заявки не выйдет.
+  phoneWarning: {
+    color: "#fbbf24",
+    fontSize: 11.5,
+    lineHeight: 16,
+    marginTop: 6,
   },
   savingHint: {
     color: colors.textMuted,

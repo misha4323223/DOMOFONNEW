@@ -5,8 +5,10 @@ import {
   FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -22,6 +24,7 @@ import { EmptyState } from "../components/EmptyState";
 import { ListSkeleton } from "../components/Skeletons";
 import { colors } from "../theme";
 import { callPhone } from "../phone";
+import { cityFoldersOf, filterArchive } from "../archiveFilter";
 import { analyzeLeads, type ClientGroup } from "../repeats";
 
 interface Props {
@@ -55,9 +58,36 @@ export function ArchiveScreen({ token, onBack }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
   // Раскрытые истории абонентов (ключ — id последней заявки)
   const [opened, setOpened] = useState<Record<string, boolean>>({});
+  // Поиск по номеру телефона, адресу или имени
+  const [query, setQuery] = useState("");
+  // Выбранная папка-город (null — «Все города»)
+  const [city, setCity] = useState<string | null>(null);
+
+  /**
+   * Папки по городам собираются сами из архива: Ефремов, Щёкино, Богородицк
+   * и «Без города» — для заявок, где город не распознан. Ничего настраивать
+   * не нужно: новая заявка сама попадает в свою папку.
+   */
+  const cityFolders = useMemo(() => cityFoldersOf(leads ?? []), [leads]);
+
+  // Отбор по папке и поиску — до группировки, чтобы счётчики не расходились
+  const filtered = useMemo(
+    () => filterArchive(leads ?? [], city, query),
+    [leads, city, query],
+  );
 
   // Заявки одного абонента — одной карточкой: телефон или адрес совпали.
-  const groups = useMemo(() => (leads ? analyzeLeads(leads).groups : []), [leads]);
+  const groups = useMemo(() => analyzeLeads(filtered).groups, [filtered]);
+
+  const filtersActive = city !== null || query.trim().length > 0;
+
+  // Заявки могли вернуть из архива или удалить — пустая папка не должна
+  // оставаться выбранной и показывать пустой экран.
+  useEffect(() => {
+    if (city && !cityFolders.some((folder) => folder.name === city)) {
+      setCity(null);
+    }
+  }, [cityFolders, city]);
 
   const load = useCallback(
     async (asRefresh = false) => {
@@ -314,13 +344,67 @@ export function ArchiveScreen({ token, onBack }: Props) {
             <Text style={styles.headerTitle}>Архив</Text>
             <Text style={styles.headerCount}>
               {leads
-                ? `${leads.length} ${leads.length === 1 ? "заявка" : "заявок"}${
-                    groups.length < leads.length ? ` · абонентов: ${groups.length}` : ""
+                ? `${filtered.length} ${filtered.length === 1 ? "заявка" : "заявок"}${
+                    filtersActive ? ` из ${leads.length}` : ""
+                  }${
+                    groups.length < filtered.length ? ` · абонентов: ${groups.length}` : ""
                   }`
                 : " "}
             </Text>
           </View>
         </View>
+
+        {/* Поиск по архиву: номер телефона, адрес или имя */}
+        <View style={styles.searchRow}>
+          <Text style={styles.searchIcon}>🔍</Text>
+          <TextInput
+            style={styles.searchInput}
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Номер телефона, адрес или имя"
+            placeholderTextColor={colors.textMuted}
+            autoCorrect={false}
+            autoCapitalize="none"
+            returnKeyType="search"
+          />
+          {query ? (
+            <Pressable onPress={() => setQuery("")} hitSlop={10}>
+              <Text style={styles.searchClear}>✕</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        {/* Папки по городам: заявки раскладываются автоматически */}
+        {cityFolders.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.folders}
+          >
+            <Pressable
+              style={[styles.folder, city === null && styles.folderActive]}
+              onPress={() => setCity(null)}
+            >
+              <Text style={[styles.folderText, city === null && styles.folderTextActive]}>
+                📁 Все города · {leads?.length ?? 0}
+              </Text>
+            </Pressable>
+            {cityFolders.map((folder) => {
+              const active = city === folder.name;
+              return (
+                <Pressable
+                  key={folder.name}
+                  style={[styles.folder, active && styles.folderActive]}
+                  onPress={() => setCity(active ? null : folder.name)}
+                >
+                  <Text style={[styles.folderText, active && styles.folderTextActive]}>
+                    📁 {folder.name} · {folder.count}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        ) : null}
       </View>
 
       {leads === null && !error ? (
@@ -335,6 +419,8 @@ export function ArchiveScreen({ token, onBack }: Props) {
       ) : (
         <FlatList
           data={groups}
+          // Сбрасываем прокрутку (и раскрытые истории) при смене папки/поиска
+          extraData={`${city ?? ""}|${query}`}
           keyExtractor={(item) => item.leads.map((lead) => lead.id).join("|")}
           renderItem={renderGroup}
           contentContainerStyle={styles.list}
@@ -346,11 +432,25 @@ export function ArchiveScreen({ token, onBack }: Props) {
             />
           }
           ListEmptyComponent={
-            <EmptyState
-              iconName="archive-outline"
-              title="Архив пуст"
-              hint="Выполненные заявки отправляются сюда с главного экрана"
-            />
+            filtersActive ? (
+              <EmptyState
+                iconName="search-outline"
+                title="Ничего не найдено"
+                hint={
+                  city && query.trim()
+                    ? `В папке «${city}» нет заявок по запросу «${query.trim()}». Попробуйте другой город или сбросьте поиск.`
+                    : city
+                      ? `В папке «${city}» пока нет заявок.`
+                      : `По запросу «${query.trim()}» ничего нет — ищите по номеру телефона или адресу.`
+                }
+              />
+            ) : (
+              <EmptyState
+                iconName="archive-outline"
+                title="Архив пуст"
+                hint="Выполненные заявки отправляются сюда с главного экрана"
+              />
+            )
           }
         />
       )}
@@ -402,6 +502,38 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 13,
   },
+  // Поиск по архиву
+  searchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 10,
+    backgroundColor: colors.inputBg,
+    paddingHorizontal: 10,
+  },
+  searchIcon: { fontSize: 14 },
+  searchInput: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 15,
+    paddingVertical: 9,
+  },
+  searchClear: { color: colors.textMuted, fontSize: 15, fontWeight: "700" },
+  // Папки по городам
+  folders: { gap: 8, paddingRight: 4 },
+  folder: {
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: colors.inputBg,
+  },
+  folderActive: { borderColor: colors.primary, backgroundColor: colors.primary },
+  folderText: { color: colors.textMuted, fontSize: 13, fontWeight: "700" },
+  folderTextActive: { color: colors.primaryForeground },
   list: {
     padding: 14,
     gap: 10,

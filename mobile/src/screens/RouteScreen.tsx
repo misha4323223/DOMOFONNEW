@@ -29,6 +29,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -50,6 +51,9 @@ import { EmptyState } from "../components/EmptyState";
 import { ListSkeleton } from "../components/Skeletons";
 import { useRouteCity } from "../components/CityPicker";
 import { callPhone } from "../phone";
+import { BASE_POINT_ID, loadRideBase, saveRideBase, type RideBase } from "../ride";
+import { takePendingAction } from "../rideTrack";
+import { loadVoiceEnabled, saveVoiceEnabled, speak, stopSpeaking } from "../voice";
 import { leadCity } from "../maps";
 import { MapScreen, isMapAvailable, type MapStop } from "./MapScreen";
 import { colors } from "../theme";
@@ -137,6 +141,11 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
           name: lead?.name ?? "",
           address: lead?.address ?? "",
           city: lead ? (leadCity(lead) ?? undefined) : undefined,
+          // Телефон нужен панели поездки: звонок и «буду через N минут».
+          phone: lead?.phone || undefined,
+          // Расходники: заявку с ними нельзя закрыть из шторки молча —
+          // там списание с остатка, мастера надо спросить.
+          hasParts: (lead?.parts?.length ?? 0) > 0 && lead?.partsDone !== "1",
           done: lead?.status === "done",
         };
       }),
@@ -233,6 +242,119 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
   const startRoute = () => {
     if (stops.length === 0) return;
     void savePlan(touchRoutePlan(stops, new Date().toISOString()));
+  };
+
+  /**
+   * «Клиента нет» в поездке: точка уезжает в конец маршрута, заявка остаётся
+   * в работе — мастер просто едет к следующей, а к этой вернётся, если успеет.
+   */
+  const sendToEnd = (id: string) => {
+    const rest = stops.filter((stopId) => stopId !== id);
+    if (rest.length === stops.length) return;
+    void savePlan(touchRoutePlan([...rest, id], plan.startedAt));
+  };
+
+  // Голос поездки: включён по умолчанию, выключается одной строкой ниже
+  // (в самой поездке кнопки нет — экран отдан карте и дороге).
+  const [voiceOn, setVoiceOn] = useState(true);
+
+  useEffect(() => {
+    void loadVoiceEnabled().then(setVoiceOn);
+  }, []);
+
+  const toggleVoice = () => {
+    const next = !voiceOn;
+    setVoiceOn(next);
+    void saveVoiceEnabled(next);
+    if (next) speak("Голос включён", true);
+    else stopSpeaking();
+  };
+
+  /**
+   * Приложение открыли кнопкой в уведомлении («Выполнено» / «Позвонить»).
+   * Заявки к этому моменту уже загружены — сразу делаем то, о чём просили,
+   * а не заставляем мастера искать заявку в списке.
+   */
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    void (async () => {
+      const action = await takePendingAction();
+      if (cancelled || !action) return;
+      const id = currentStopId({ ...plan, stops }, leads);
+      const lead = id ? byId.get(id) : undefined;
+      if (!lead) return;
+      if (action === "call") callPhone(lead.phone ?? "");
+      if (action === "done") finishCurrent(lead);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loading]);
+
+  // База — куда возвращаться после последней заявки. Лежит в телефоне
+  // (см. ../ride): экран карты сам читает её, когда начинается поездка.
+  const [base, setBase] = useState<RideBase>({ address: "", lat: null, lon: null });
+  const [baseOpen, setBaseOpen] = useState(false);
+  const [baseDraft, setBaseDraft] = useState("");
+  const [baseBusy, setBaseBusy] = useState(false);
+  const [baseError, setBaseError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void loadRideBase().then(setBase);
+  }, []);
+
+  /**
+   * Найти адрес базы на карте и запомнить. Без интернета адрес тоже не теряем:
+   * сервер разберёт его при следующей попытке (тогда же найдутся координаты).
+   */
+  const saveBase = async () => {
+    const address = baseDraft.trim();
+    if (!address) {
+      setBaseError("Введите адрес: город, улица, дом");
+      return;
+    }
+    setBaseBusy(true);
+    setBaseError(null);
+    try {
+      const data = await api.geoPlan(token, [{ id: BASE_POINT_ID, address }]);
+      const stop = (data?.stops ?? []).find((s) => s.id === BASE_POINT_ID);
+      const lat = typeof stop?.lat === "number" ? stop.lat : null;
+      const lon = typeof stop?.lon === "number" ? stop.lon : null;
+      const next: RideBase = { address, lat, lon };
+      setBase(next);
+      await saveRideBase(next);
+      setBaseOpen(false);
+      if (lat === null) {
+        Alert.alert(
+          "Адрес не нашёлся",
+          "База сохранена, но точку на карте найти не удалось — расстояние до дома считать не получится. Проверьте адрес.",
+        );
+      }
+    } catch (e) {
+      if (isNetworkError(e)) {
+        // Связи нет — сохраняем хотя бы адрес, чтобы не набирать заново.
+        const fallback: RideBase = { address, lat: null, lon: null };
+        setBase(fallback);
+        await saveRideBase(fallback);
+        setBaseOpen(false);
+        Alert.alert(
+          "Нет связи",
+          "Адрес базы сохранён. Координаты найдём, когда появится интернет — откройте это окно и сохраните ещё раз.",
+        );
+      } else {
+        setBaseError(e instanceof Error ? e.message : "Не удалось найти адрес");
+      }
+    } finally {
+      setBaseBusy(false);
+    }
+  };
+
+  const clearBase = async () => {
+    const empty: RideBase = { address: "", lat: null, lon: null };
+    setBase(empty);
+    await saveRideBase(empty);
+    setBaseOpen(false);
   };
 
   const resorter = () => {
@@ -649,6 +771,46 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
                 </Pressable>
               ) : null}
 
+              {/* База (дом): встаёт последним пунктом — в поездке видно, сколько
+                  осталось до дома, а Навигатор ведёт туда после последней заявки. */}
+              <Pressable
+                style={({ pressed }) => [styles.baseRow, pressed && { opacity: 0.85 }]}
+                onPress={() => {
+                  setBaseDraft(base.address);
+                  setBaseError(null);
+                  setBaseOpen(true);
+                }}
+              >
+                <Ionicons
+                  name={base.lat !== null ? "home" : "home-outline"}
+                  size={16}
+                  color={base.lat !== null ? colors.primary : colors.textMuted}
+                />
+                <Text style={styles.baseText} numberOfLines={1}>
+                  {base.address
+                    ? `Дом: ${base.address}`
+                    : "Указать дом — куда возвращаться после маршрута"}
+                </Text>
+              </Pressable>
+
+              {/* Голос: «через 300 метров поверните направо», «Следующая — …».
+                  Выключенным он запоминается — заходишь в приложение, и тихо. */}
+              <Pressable
+                style={({ pressed }) => [styles.baseRow, pressed && { opacity: 0.85 }]}
+                onPress={toggleVoice}
+              >
+                <Ionicons
+                  name={voiceOn ? "volume-high" : "volume-mute"}
+                  size={16}
+                  color={voiceOn ? colors.primary : colors.textMuted}
+                />
+                <Text style={styles.baseText} numberOfLines={2}>
+                  {voiceOn
+                    ? "Голос включён: подсказки поворотов и точки маршрута"
+                    : "Голос выключен: приложение молчит, только карта"}
+                </Text>
+              </Pressable>
+
               <Pressable
                 style={({ pressed }) => [styles.startButton, pressed && { opacity: 0.85 }]}
                 onPress={startRoute}
@@ -797,6 +959,57 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
         </View>
       </Modal>
 
+      {/* База (дом): адрес, куда возвращаемся после последней заявки */}
+      <Modal
+        visible={baseOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setBaseOpen(false)}
+      >
+        <View style={styles.baseBackdrop}>
+          <View style={styles.baseCard}>
+            <Text style={styles.baseTitle}>Дом (база)</Text>
+            <Text style={styles.baseHint}>
+              Этот адрес встанет последним пунктом маршрута: в поездке будет видно,
+              сколько осталось до дома.
+            </Text>
+            <TextInput
+              style={styles.baseInput}
+              value={baseDraft}
+              onChangeText={setBaseDraft}
+              placeholder="Город, улица, дом"
+              placeholderTextColor={colors.textMuted}
+              autoCorrect={false}
+            />
+            {baseError ? <Text style={styles.baseError}>{baseError}</Text> : null}
+            <View style={styles.baseActions}>
+              <Pressable
+                style={({ pressed }) => [styles.baseCancel, pressed && { opacity: 0.8 }]}
+                onPress={() => setBaseOpen(false)}
+              >
+                <Text style={styles.baseCancelText}>Отмена</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.baseSave,
+                  baseBusy && { opacity: 0.6 },
+                  pressed && { opacity: 0.85 },
+                ]}
+                disabled={baseBusy}
+                onPress={() => void saveBase()}
+              >
+                <Text style={styles.baseSaveText}>{baseBusy ? "Ищу…" : "Сохранить"}</Text>
+              </Pressable>
+            </View>
+            {base.address ? (
+              <Pressable style={styles.baseClear} onPress={() => void clearBase()}>
+                <Text style={styles.baseClearText}>Убрать базу</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+
       {/* Окно выбора города — если город не понятен из заявки */}
       {picker}
 
@@ -822,6 +1035,9 @@ export function RouteScreen({ token, onBack, onOpenLead }: Props) {
             const lead = byId.get(id);
             if (lead) finishCurrent(lead);
           }}
+          // «Клиента нет дома» из поездки: точка едет в конец маршрута,
+          // заявка остаётся в работе — мастер продолжает объезд.
+          onPostpone={sendToEnd}
         />
       ) : null}
     </SafeAreaView>
@@ -1380,5 +1596,99 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
     lineHeight: 19,
+  },
+  baseRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  baseText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 13.5,
+  },
+  baseBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  baseCard: {
+    width: "100%",
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 16,
+    padding: 18,
+    gap: 10,
+  },
+  baseTitle: {
+    color: colors.text,
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  baseHint: {
+    color: colors.textMuted,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  baseInput: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 10,
+    color: colors.text,
+    fontSize: 14.5,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  baseError: {
+    color: "#f87171",
+    fontSize: 12.5,
+  },
+  baseActions: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  baseCancel: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  baseCancelText: {
+    color: colors.textMuted,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  baseSave: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 11,
+    borderRadius: 10,
+    backgroundColor: colors.primary,
+  },
+  baseSaveText: {
+    color: colors.primaryForeground,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  baseClear: {
+    alignItems: "center",
+    paddingVertical: 6,
+  },
+  baseClearText: {
+    color: colors.textMuted,
+    fontSize: 12.5,
+    textDecorationLine: "underline",
   },
 });
